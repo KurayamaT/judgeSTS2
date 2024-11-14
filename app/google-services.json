@@ -1,0 +1,107 @@
+{
+  "project_info": {
+    "project_number": "686357189379",
+    "firebase_url": "https://whs-3-firebase-nonrealm-default-rtdb.firebaseio.com",
+    "project_id": "whs-3-firebase-nonrealm",
+    "storage_bucket": "whs-3-firebase-nonrealm.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:686357189379:android:423a62bcac915443aecf36",
+        "android_client_info": {
+          "package_name": "com.example.judgests"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "686357189379-t07npifhicj5fadkhuim5lgnga020j0j.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBNeEBc1CYZlR7cLxQMKrzxxPWTBgWq5ns"
+        },
+        {
+          "current_key": "AIzaSyA6C6fJCWBNK4NUv4tuKNH3wnVJhUrlf4U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "686357189379-p2i5ab32bedukgmh7m7evt92oupq4054.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:686357189379:android:737ccfaab8c40dedaecf36",
+        "android_client_info": {
+          "package_name": "uniontool.co.jp.whs3_EMG"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "686357189379-t07npifhicj5fadkhuim5lgnga020j0j.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBNeEBc1CYZlR7cLxQMKrzxxPWTBgWq5ns"
+        },
+        {
+          "current_key": "AIzaSyA6C6fJCWBNK4NUv4tuKNH3wnVJhUrlf4U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "686357189379-p2i5ab32bedukgmh7m7evt92oupq4054.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:686357189379:android:1178f20c62e3ce4baecf36",
+        "android_client_info": {
+          "package_name": "uniontool.co.jp.whs3_kurayama_test"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "686357189379-t07npifhicj5fadkhuim5lgnga020j0j.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBNeEBc1CYZlR7cLxQMKrzxxPWTBgWq5ns"
+        },
+        {
+          "current_key": "AIzaSyA6C6fJCWBNK4NUv4tuKNH3wnVJhUrlf4U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "686357189379-p2i5ab32bedukgmh7m7evt92oupq4054.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
