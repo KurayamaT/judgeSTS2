@@ -12,11 +12,13 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.google.firebase.database.FirebaseDatabase
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.TimeUnit
 
 class AccelerometerService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
@@ -24,16 +26,32 @@ class AccelerometerService : Service(), SensorEventListener {
     private lateinit var database: FirebaseDatabase
     private var wakeLock: PowerManager.WakeLock? = null
     private var sessionStartTime: String? = null
+    private var recordingStartTime: Long = 0L
+
+    //  data size in each sending to firebase.
+    private val MAX_BUFFER_SIZE = 1000  // 例: 1000サンプルごとに送信
+
+
+    // 現在の加速度値を保持するプロパティを追加
+    private var currentX: Float = 0f
+    private var currentY: Float = 0f
+    private var currentZ: Float = 0f
 
     private var isRecording = false
-    private val dataBuffer = StringBuilder(3000)  // 余裕を持ったサイズ
+    private val dataBuffer = StringBuilder(3000)
     private var lastWriteTime = 0L
+    private var cumulativeDataSize = 0L
+
+    // ストレージ関連
+    private val storageBuffer = ArrayList<String>(1000)
+    private var lastStorageWriteTime = 0L
+    private val STORAGE_WRITE_INTERVAL = 1000L
+    private val FIREBASE_WRITE_INTERVAL = 10000L  // Firebaseへの送信を10秒間隔に変更
 
     companion object {
         private const val CHANNEL_ID = "AccelerometerServiceChannel"
         private const val NOTIFICATION_ID = 1
         private const val WAKELOCK_TAG = "AccelerometerService::WakeLock"
-        private const val WRITE_INTERVAL_MS = 5000 // 5秒間隔で送信
     }
 
     override fun onCreate() {
@@ -46,7 +64,6 @@ class AccelerometerService : Service(), SensorEventListener {
             createNotificationChannel()
         }
 
-        // WakeLockの初期化
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
@@ -65,9 +82,15 @@ class AccelerometerService : Service(), SensorEventListener {
     private fun startRecording() {
         if (!isRecording) {
             isRecording = true
+            recordingStartTime = System.currentTimeMillis()
             sessionStartTime = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault())
                 .format(Date())
             lastWriteTime = System.currentTimeMillis()
+            lastStorageWriteTime = System.currentTimeMillis()  // 追加
+            cumulativeDataSize = 0L
+
+            // ファイルのヘッダーを作成
+            initializeStorageFile()
 
             val notification = createNotification()
             startForeground(NOTIFICATION_ID, notification)
@@ -78,39 +101,44 @@ class AccelerometerService : Service(), SensorEventListener {
                 }
             }
 
-            // 200Hzでセンサーを登録
             sensorManager.registerListener(
                 this,
                 accelerometer,
-                5000  // 200Hz (5000マイクロ秒)
+                10000  // 既存の設定を維持
             )
 
             Log.d("Recording", "Started new session at: $sessionStartTime")
         }
     }
 
+    private fun initializeStorageFile() {
+        try {
+            val file = File(getExternalFilesDir(null), "${sessionStartTime}_accelerometer.csv")
+            if (!file.exists()) {
+                file.createNewFile()
+                file.writeText("Timestamp(ms),X,Y,Z\n")
+            }
+        } catch (e: Exception) {
+            Log.e("Storage", "Error initializing file", e)
+        }
+    }
 
     private fun stopRecording() {
         if (isRecording) {
             isRecording = false
             sensorManager.unregisterListener(this)
 
-            // WakeLockを解放
             wakeLock?.apply {
                 if (isHeld) {
                     release()
                 }
             }
 
-            // APIレベルに応じて適切なメソッドを使用
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // Android 13 (API 33)以上
                 stopForeground(STOP_FOREGROUND_DETACH)
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                // Android 7.0 (API 24)以上
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
-                // それ以前のバージョン
                 @Suppress("DEPRECATION")
                 stopForeground(true)
             }
@@ -121,25 +149,29 @@ class AccelerometerService : Service(), SensorEventListener {
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type == Sensor.TYPE_ACCELEROMETER && isRecording) {
             val currentTime = System.currentTimeMillis()
-            val x = event.values[0]
-            val y = event.values[1]
-            val z = event.values[2]
+            currentX = event.values[0]
+            currentY = event.values[1]
+            currentZ = event.values[2]
 
-            // 内部ストレージにも保存
-            saveToInternalStorage(currentTime, x, y, z)
+            // データラインを作成
+            val dataLine = "$currentTime,$currentX,$currentY,$currentZ\n"
 
-            // データをバッファに追加
-            dataBuffer.append(currentTime)
-                .append(",")
-                .append(x)
-                .append(",")
-                .append(y)
-                .append(",")
-                .append(z)
-                .append("\n")
+            // Firebaseバッファに追加
+            dataBuffer.append(dataLine)
 
-            // 5秒経過したらデータを送信
-            if (currentTime - lastWriteTime >= WRITE_INTERVAL_MS) {
+            // ストレージバッファに追加
+            storageBuffer.add(dataLine)
+
+            cumulativeDataSize += dataLine.length
+
+            // ストレージへの書き込みを1秒ごとに実行
+            if (currentTime - lastStorageWriteTime >= STORAGE_WRITE_INTERVAL) {
+                saveBufferToStorage()
+                lastStorageWriteTime = currentTime
+            }
+
+            // Firebaseへの送信（30秒間隔）
+            if (currentTime - lastWriteTime >= FIREBASE_WRITE_INTERVAL) {
                 saveBufferToFirebase()
                 lastWriteTime = currentTime
             }
@@ -149,23 +181,61 @@ class AccelerometerService : Service(), SensorEventListener {
 
 
 
+
+    private fun saveBufferToStorage() {
+        if (storageBuffer.isEmpty()) return
+
+        try {
+            val file = File(getExternalFilesDir(null), "${sessionStartTime}_accelerometer.csv")
+            file.appendText(storageBuffer.joinToString(""))
+            storageBuffer.clear()
+        } catch (e: Exception) {
+            Log.e("Storage", "Error writing to file", e)
+        }
+    }
+
+
+
+
+    private fun formatElapsedTime(elapsedMillis: Long): String {
+        val hours = TimeUnit.MILLISECONDS.toHours(elapsedMillis)
+        val minutes = TimeUnit.MILLISECONDS.toMinutes(elapsedMillis) % 60
+        val seconds = TimeUnit.MILLISECONDS.toSeconds(elapsedMillis) % 60
+        return String.format("%02d:%02d:%02d", hours, minutes, seconds)
+    }
+
     private fun saveBufferToFirebase() {
         if (dataBuffer.isEmpty() || sessionStartTime == null) return
 
+        val currentTime = System.currentTimeMillis()
         val reference = database.getReference("SmartPhone_data")
             .child(sessionStartTime!!)
-            .child(lastWriteTime.toString())
+            .child(currentTime.toString())
 
-        reference.setValue(dataBuffer.toString())
+        val dataToSend = dataBuffer.toString()
+        val elapsedTime = currentTime - recordingStartTime
+        val formattedElapsedTime = formatElapsedTime(elapsedTime)
+        val dataSizeKB = String.format("%.2f", cumulativeDataSize / 1024.0)
+
+        // 最新の加速度値の大きさを計算
+        val accelerationMagnitude = String.format("%.2f",
+            Math.sqrt((currentX * currentX + currentY * currentY + currentZ * currentZ).toDouble()))
+
+        reference.setValue(dataToSend)
             .addOnSuccessListener {
-                Log.d("Firebase", "Saved 5-second batch data at: $lastWriteTime")
+                showToast("ACC計測中\n$formattedElapsedTime ${dataSizeKB}KB\n加速度: ${accelerationMagnitude}G")
+                Log.d("Firebase", "Saved batch data at: $currentTime")
                 dataBuffer.clear()
             }
             .addOnFailureListener { e ->
                 Log.e("Firebase", "Error saving data", e)
+                showToast("データ送信エラー")
             }
     }
 
+    private fun showToast(message: String) {
+        Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+    }
 
     private fun saveToInternalStorage(timestamp: Long, x: Float, y: Float, z: Float) {
         val file = File(getExternalFilesDir(null), "${sessionStartTime}_accelerometer.csv")
@@ -181,9 +251,6 @@ class AccelerometerService : Service(), SensorEventListener {
             e.printStackTrace()
         }
     }
-
-
-
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -232,9 +299,13 @@ class AccelerometerService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        // 最後のバッファデータを保存
+        // 残っているデータを保存
         if (dataBuffer.isNotEmpty()) {
             saveBufferToFirebase()
+        }
+        // ストレージバッファの残りを保存
+        if (storageBuffer.isNotEmpty()) {
+            saveBufferToStorage()
         }
         sensorManager.unregisterListener(this)
         wakeLock?.apply {
