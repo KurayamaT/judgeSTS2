@@ -1,29 +1,41 @@
 package com.example.judgests
 
 import android.annotation.SuppressLint
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
-import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.firebase.database.FirebaseDatabase
 import java.io.File
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class AccelerometerService : Service(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
+    private lateinit var sensor: Sensor
     private var accelerometer: Sensor? = null
     private lateinit var database: FirebaseDatabase
     private var wakeLock: PowerManager.WakeLock? = null
@@ -44,8 +56,6 @@ class AccelerometerService : Service(), SensorEventListener {
     private val storageBuffer = ArrayList<String>(1000)
     private var lastStorageWriteTime = 0L
 
-
-    private val SENSOR_DELAY_MICROS = 5000 // 100ミリ秒
     private val STORAGE_WRITE_INTERVAL = 1000L
     private val FIREBASE_WRITE_INTERVAL = 10000L  // Firebaseへの送信を10秒間隔に変更
 
@@ -56,21 +66,38 @@ class AccelerometerService : Service(), SensorEventListener {
     }
 
 
+    private val SENSOR_SAMPLING_PERIOD_US = 10000  // 10ms間隔 (100Hz)
+    private val maxReportLatencyUs = 50000
+
     override fun onCreate() {
         super.onCreate()
         database = FirebaseDatabase.getInstance()
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            createNotificationChannel()
-        }
+        // SensorManagerの初期化
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            WAKELOCK_TAG
-        )
+        // センサーを取得
+        sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)!!
+
+
+        // Android 8.0 (API 26) 以降では、より詳細なセンサー設定が可能
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            sensorManager.registerListener(
+                this,
+                sensor,
+                SENSOR_SAMPLING_PERIOD_US, // サンプリング周期を設定
+                maxReportLatencyUs         // レイテンシー設定で負荷軽減
+            )
+        } else {
+            // 古いバージョンでは近似値を設定
+            sensorManager.registerListener(
+                this,
+                accelerometer,
+                SensorManager.SENSOR_DELAY_GAME  // 約20ms (50Hz) - FASTEST(0ms)より適切
+            )
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -103,11 +130,22 @@ class AccelerometerService : Service(), SensorEventListener {
                 }
             }
 
-            sensorManager.registerListener(
-                this,
-                accelerometer,
-                SENSOR_DELAY_MICROS
-            )
+            // 記録開始時にもセンサーを再登録
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                sensorManager.registerListener(
+                    this,
+                    accelerometer,
+                    SENSOR_SAMPLING_PERIOD_US,
+                    maxReportLatencyUs
+                )
+            } else {
+                sensorManager.registerListener(
+                    this,
+                    accelerometer,
+                    SensorManager.SENSOR_DELAY_GAME
+                )
+            }
+
 
             Log.d("Recording", "Started new session at: $sessionStartTime")
         }
@@ -148,6 +186,9 @@ class AccelerometerService : Service(), SensorEventListener {
         }
     }
 
+
+    private var lastTimestamp: Long? = null
+
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type == Sensor.TYPE_ACCELEROMETER && isRecording) {
             val currentTime = System.currentTimeMillis()
@@ -180,6 +221,15 @@ class AccelerometerService : Service(), SensorEventListener {
 
             // display on Main screen.
             sendAccelerometerData(currentX, currentY, currentZ)
+
+            event?.let {
+                val timestampInMs = event.timestamp / 1_000_000  // ナノ秒からミリ秒に変換
+                lastTimestamp?.let { last ->
+                    val interval = timestampInMs - last
+                    Log.d("SensorSampling", "Interval: ${interval}ms")
+                }
+                lastTimestamp = timestampInMs
+            }
         }
     }
 
@@ -223,24 +273,57 @@ class AccelerometerService : Service(), SensorEventListener {
         val formattedElapsedTime = formatElapsedTime(elapsedTime)
         val dataSizeKB = String.format("%.2f", cumulativeDataSize / 1024.0)
 
-        // 最新の加速度値の大きさを計算
-        val accelerationMagnitude = String.format("%.2f",
-            Math.sqrt((currentX * currentX + currentY * currentY + currentZ * currentZ).toDouble()))
-
         reference.setValue(dataToSend)
             .addOnSuccessListener {
-                showToast("ACC計測中\n$formattedElapsedTime ${dataSizeKB}KB\n加速度: ${accelerationMagnitude}G")
+                val message = """
+                📊 ACC計測中
+                ⏱ 経過時間: $formattedElapsedTime
+                💾 データ: ${dataSizeKB}KB
+            """.trimIndent()
+
+                showToast(message)
                 Log.d("Firebase", "Saved batch data at: $currentTime")
                 dataBuffer.clear()
             }
             .addOnFailureListener { e ->
                 Log.e("Firebase", "Error saving data", e)
-                showToast("データ送信エラー")
+                showToast("❌ データ送信エラー")
             }
     }
 
     private fun showToast(message: String) {
-        Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+        Handler(Looper.getMainLooper()).post {
+            Toast(applicationContext).apply {
+                duration = Toast.LENGTH_LONG
+                // 位置を下側に調整（yOffsetを正の値に設定）
+                setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0, 150)  // 150dpを下から空ける
+
+                // カスタムレイアウトの作成
+                val layout = LinearLayout(applicationContext).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER
+                    setPadding(40, 25, 40, 25)
+
+                    // 背景設定
+                    background = GradientDrawable().apply {
+                        cornerRadius = 25f
+                        setColor(Color.argb(230, 33, 33, 33))
+                    }
+                }
+
+                val textView = TextView(applicationContext).apply {
+                    text = message
+                    textSize = 16f
+                    setTextColor(Color.WHITE)
+                    gravity = Gravity.CENTER
+                    setSingleLine(false)
+                    setLineSpacing(0f, 1.2f)
+                }
+
+                layout.addView(textView)
+                view = layout
+            }.show()
+        }
     }
 
     private fun saveToInternalStorage(timestamp: Long, x: Float, y: Float, z: Float) {
