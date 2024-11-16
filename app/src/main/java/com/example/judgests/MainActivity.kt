@@ -1,7 +1,10 @@
 package com.example.judgests
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -11,6 +14,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 
 class MainActivity : AppCompatActivity() {
     private lateinit var xValue: TextView
@@ -18,6 +22,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var zValue: TextView
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
+    private lateinit var accelerometerDataReceiver: BroadcastReceiver
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -50,6 +55,33 @@ class MainActivity : AppCompatActivity() {
 
         // 初期状態ではstopButtonを無効化
         stopButton.isEnabled = false
+
+        accelerometerDataReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                intent?.let {
+                    val x = it.getFloatExtra("X", 0f)
+                    val y = it.getFloatExtra("Y", 0f)
+                    val z = it.getFloatExtra("Z", 0f)
+                    updateAccelerometerData(x, y, z)
+                }
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        LocalBroadcastManager.getInstance(this).registerReceiver(accelerometerDataReceiver, IntentFilter("ACCELEROMETER_DATA"))
+    }
+
+    override fun onPause() {
+        super.onPause()
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(accelerometerDataReceiver)
+    }
+
+    private fun updateAccelerometerData(x: Float, y: Float, z: Float) {
+        xValue.text = String.format("X: %.2f", x)
+        yValue.text = String.format("Y: %.2f", y)
+        zValue.text = String.format("Z: %.2f", z)
     }
 
     private fun startRecording() {

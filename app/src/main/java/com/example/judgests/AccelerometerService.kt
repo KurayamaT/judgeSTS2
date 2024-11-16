@@ -1,5 +1,6 @@
 package com.example.judgests
 
+import android.annotation.SuppressLint
 import android.app.*
 import android.content.Context
 import android.content.Intent
@@ -14,6 +15,7 @@ import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.firebase.database.FirebaseDatabase
 import java.io.File
 import java.text.SimpleDateFormat
@@ -28,10 +30,6 @@ class AccelerometerService : Service(), SensorEventListener {
     private var sessionStartTime: String? = null
     private var recordingStartTime: Long = 0L
 
-    //  data size in each sending to firebase.
-    private val MAX_BUFFER_SIZE = 1000  // 例: 1000サンプルごとに送信
-
-
     // 現在の加速度値を保持するプロパティを追加
     private var currentX: Float = 0f
     private var currentY: Float = 0f
@@ -45,6 +43,9 @@ class AccelerometerService : Service(), SensorEventListener {
     // ストレージ関連
     private val storageBuffer = ArrayList<String>(1000)
     private var lastStorageWriteTime = 0L
+
+
+    private val SENSOR_DELAY_MICROS = 5000 // 100ミリ秒
     private val STORAGE_WRITE_INTERVAL = 1000L
     private val FIREBASE_WRITE_INTERVAL = 10000L  // Firebaseへの送信を10秒間隔に変更
 
@@ -53,6 +54,7 @@ class AccelerometerService : Service(), SensorEventListener {
         private const val NOTIFICATION_ID = 1
         private const val WAKELOCK_TAG = "AccelerometerService::WakeLock"
     }
+
 
     override fun onCreate() {
         super.onCreate()
@@ -104,7 +106,7 @@ class AccelerometerService : Service(), SensorEventListener {
             sensorManager.registerListener(
                 this,
                 accelerometer,
-                10000  // 既存の設定を維持
+                SENSOR_DELAY_MICROS
             )
 
             Log.d("Recording", "Started new session at: $sessionStartTime")
@@ -175,6 +177,9 @@ class AccelerometerService : Service(), SensorEventListener {
                 saveBufferToFirebase()
                 lastWriteTime = currentTime
             }
+
+            // display on Main screen.
+            sendAccelerometerData(currentX, currentY, currentZ)
         }
     }
 
@@ -204,6 +209,7 @@ class AccelerometerService : Service(), SensorEventListener {
         return String.format("%02d:%02d:%02d", hours, minutes, seconds)
     }
 
+    @SuppressLint("DefaultLocale")
     private fun saveBufferToFirebase() {
         if (dataBuffer.isEmpty() || sessionStartTime == null) return
 
@@ -313,5 +319,14 @@ class AccelerometerService : Service(), SensorEventListener {
                 release()
             }
         }
+    }
+
+    private fun sendAccelerometerData(x: Float, y: Float, z: Float) {
+        val intent = Intent("ACCELEROMETER_DATA").apply {
+            putExtra("X", x)
+            putExtra("Y", y)
+            putExtra("Z", z)
+        }
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 }
