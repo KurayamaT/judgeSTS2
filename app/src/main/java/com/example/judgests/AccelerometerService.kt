@@ -78,11 +78,11 @@ class AccelerometerService : Service(), SensorEventListener {
                 }
             }
 
-            // 最高サンプリングレートでセンサーを登録
+            // 200Hzでセンサーを登録
             sensorManager.registerListener(
                 this,
                 accelerometer,
-                SensorManager.SENSOR_DELAY_FASTEST
+                5000  // 200Hz (5000マイクロ秒)
             )
 
             Log.d("Recording", "Started new session at: $sessionStartTime")
@@ -102,9 +102,16 @@ class AccelerometerService : Service(), SensorEventListener {
                 }
             }
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            // APIレベルに応じて適切なメソッドを使用
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Android 13 (API 33)以上
+                stopForeground(STOP_FOREGROUND_DETACH)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                // Android 7.0 (API 24)以上
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
+                // それ以前のバージョン
+                @Suppress("DEPRECATION")
                 stopForeground(true)
             }
             stopSelf()
