@@ -85,6 +85,8 @@ class AccelerometerService : Service(), SensorEventListener {
         private const val MAX_REPORT_LATENCY_US = 50000
     }
 
+
+
     @SuppressLint("WakelockTimeout")
     override fun onCreate() {
         super.onCreate()
