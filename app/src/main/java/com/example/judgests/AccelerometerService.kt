@@ -79,6 +79,7 @@ class AccelerometerService : Service(), SensorEventListener {
 
     private lateinit var statusOverlay: StatusOverlay
 
+    @SuppressLint("ObsoleteSdkInt")
     override fun onCreate() {
         statusOverlay = StatusOverlay(applicationContext)
         super.onCreate()
