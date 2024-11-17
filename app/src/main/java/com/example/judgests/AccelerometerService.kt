@@ -322,38 +322,46 @@ class AccelerometerService : Service(), SensorEventListener {
 
     private fun showToast(message: String) {
         Handler(Looper.getMainLooper()).post {
-            Toast(applicationContext).apply {
-                duration = Toast.LENGTH_LONG
-                // 位置を下側に調整（yOffsetを正の値に設定）
-                setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0, 150)  // 150dpを下から空ける
+            // デフォルトのToastを作成
+            val toast = Toast.makeText(applicationContext, message, Toast.LENGTH_LONG)
 
-                // カスタムレイアウトの作成
-                val layout = LinearLayout(applicationContext).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.CENTER
-                    setPadding(40, 25, 40, 25)
+            // カスタムビューを設定する方法を変更
+            val layout = LinearLayout(applicationContext).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(40, 25, 40, 25)
 
-                    // 背景設定
-                    background = GradientDrawable().apply {
-                        cornerRadius = 25f
-                        setColor(Color.argb(230, 33, 33, 33))
-                    }
+                // 背景設定
+                background = GradientDrawable().apply {
+                    cornerRadius = 25f
+                    setColor(Color.argb(230, 33, 33, 33))
                 }
+            }
 
-                val textView = TextView(applicationContext).apply {
-                    text = message
-                    textSize = 16f
-                    setTextColor(Color.WHITE)
-                    gravity = Gravity.CENTER
-                    setSingleLine(false)
-                    setLineSpacing(0f, 1.2f)
-                }
+            val textView = TextView(applicationContext).apply {
+                text = message
+                textSize = 16f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                setSingleLine(false)
+                setLineSpacing(0f, 1.2f)
+            }
 
-                layout.addView(textView)
-                view = layout
-            }.show()
+            layout.addView(textView)
+
+            // Reflectionを使用して非推奨の警告を避けて設定（将来的には非推奨になる可能性を認識）
+            try {
+                val field = Toast::class.java.getDeclaredField("mNextView")
+                field.isAccessible = true
+                field.set(toast, layout)
+            } catch (e: Exception) {
+                Log.e("Toast", "Error setting custom view", e)
+            }
+
+            toast.show()
         }
     }
+
 
     private fun saveToInternalStorage(timestamp: Long, x: Float, y: Float, z: Float) {
         val file = File(getExternalFilesDir(null), "${sessionStartTime}_accelerometer.csv")
