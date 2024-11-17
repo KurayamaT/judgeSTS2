@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -19,6 +20,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
 import android.widget.LinearLayout
@@ -75,7 +77,10 @@ class AccelerometerService : Service(), SensorEventListener {
     private val SENSOR_SAMPLING_PERIOD_US = 10000  // 10ms間隔 (100Hz)
     private val maxReportLatencyUs = 50000
 
+    private lateinit var statusOverlay: StatusOverlay
+
     override fun onCreate() {
+        statusOverlay = StatusOverlay(applicationContext)
         super.onCreate()
         database = FirebaseDatabase.getInstance()
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -116,7 +121,8 @@ class AccelerometerService : Service(), SensorEventListener {
             "START_RECORDING" -> startRecording()
             "STOP_RECORDING" -> stopRecording()
         }
-        return START_STICKY
+        // START_STICKYをRETURN_STICKYに変更
+        return Service.START_REDELIVER_INTENT
     }
 
     private fun startRecording() {
@@ -310,86 +316,16 @@ class AccelerometerService : Service(), SensorEventListener {
                 💾 データ: ${dataSizeKB}KB
             """.trimIndent()
 
-                showToast(message)
+                statusOverlay.show(message)
                 Log.d("Firebase", "Saved batch data at: $currentTime")
                 dataBuffer.clear()
             }
             .addOnFailureListener { e ->
                 Log.e("Firebase", "Error saving data", e)
-                showToast("❌ データ送信エラー")
+                statusOverlay.show("❌ データ送信エラー")
             }
     }
 
-    private fun showToast(message: String) {
-        Handler(Looper.getMainLooper()).post {
-            // デフォルトのToastを作成
-            val toast = Toast.makeText(applicationContext, message, Toast.LENGTH_LONG)
-
-            // カスタムビューを設定する方法を変更
-            val layout = LinearLayout(applicationContext).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setPadding(40, 25, 40, 25)
-
-                // 背景設定
-                background = GradientDrawable().apply {
-                    cornerRadius = 25f
-                    setColor(Color.argb(230, 33, 33, 33))
-                }
-            }
-
-            val textView = TextView(applicationContext).apply {
-                text = message
-                textSize = 16f
-                setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-                setSingleLine(false)
-                setLineSpacing(0f, 1.2f)
-            }
-
-            layout.addView(textView)
-
-            // Reflectionを使用して非推奨の警告を避けて設定（将来的には非推奨になる可能性を認識）
-            try {
-                val field = Toast::class.java.getDeclaredField("mNextView")
-                field.isAccessible = true
-                field.set(toast, layout)
-            } catch (e: Exception) {
-                Log.e("Toast", "Error setting custom view", e)
-            }
-
-            toast.show()
-        }
-    }
-
-
-    private fun saveToInternalStorage(timestamp: Long, x: Float, y: Float, z: Float) {
-        val file = File(getExternalFilesDir(null), "${sessionStartTime}_accelerometer.csv")
-        val data = "$timestamp,$x,$y,$z\n"
-
-        try {
-            if (!file.exists()) {
-                file.createNewFile()
-                file.writeText("Timestamp(ms),X,Y,Z\n")
-            }
-            file.appendText(data)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Accelerometer Service Channel",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            channel.description = "加速度センサーの記録を行っています"
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
-        }
-    }
 
     private fun createNotification(): Notification {
         val notificationIntent = packageManager
@@ -439,6 +375,7 @@ class AccelerometerService : Service(), SensorEventListener {
                 release()
             }
         }
+        statusOverlay.hide()
     }
 
     private fun sendAccelerometerData(x: Float, y: Float, z: Float) {
