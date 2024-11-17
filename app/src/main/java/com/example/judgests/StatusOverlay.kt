@@ -1,91 +1,114 @@
 package com.example.judgests
 
 import android.content.Context
-import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Build
 import android.view.Gravity
 import android.view.WindowManager
-import android.widget.LinearLayout
 import android.widget.TextView
-import android.os.Handler
-import android.os.Looper
-import android.graphics.drawable.GradientDrawable
-import android.view.WindowManager.LayoutParams.*
+import android.graphics.Color
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.graphics.Typeface
+import android.text.TextUtils
+import android.util.TypedValue
 
 class StatusOverlay(private val context: Context) {
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var overlayView: LinearLayout? = null
-    private val handler = Handler(Looper.getMainLooper())
+    private var textView: TextView? = null
+    private var isShowing = false
 
-    fun show(message: String) {
-        hide() // 既存の表示があれば消す
+    init {
+        createOverlayView()
+    }
 
-        // メインコンテナの作成
+    private fun createOverlayView() {
+        // LinearLayoutの作成
         overlayView = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-
-            background = GradientDrawable().apply {
-                cornerRadius = 16f
-                setColor(Color.argb(230, 33, 33, 33))
-            }
-
-            setPadding(40, 30, 40, 30)
+            setBackgroundResource(android.R.drawable.dialog_holo_dark_frame)
+            setPadding(24, 12, 24, 12)
         }
 
-        // メッセージの各行を処理
-        message.trimIndent().split("\n").forEach { line ->
-            TextView(context).apply {
-                text = line
-                setTextColor(Color.WHITE)
-                textSize = when {
-                    line.startsWith("📊") -> 18f
-                    else -> 16f
+        // TextViewの作成
+        textView = TextView(context).apply {
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER
+            maxLines = 4
+            ellipsize = TextUtils.TruncateAt.END
+
+            // テキストサイズを画面の大きさに応じて調整
+            setAutoSizeTextTypeUniformWithConfiguration(
+                8, // 最小テキストサイズ
+                14, // 最大テキストサイズ
+                1, // サイズステップ
+                TypedValue.COMPLEX_UNIT_SP
+            )
+        }
+
+        // TextViewをLinearLayoutに追加
+        overlayView?.addView(textView, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+    }
+
+    fun show(message: String) {
+        if (!isShowing) {
+            // オーバーレイパラメータの設定
+            val params = WindowManager.LayoutParams().apply {
+                width = WindowManager.LayoutParams.WRAP_CONTENT
+                height = WindowManager.LayoutParams.WRAP_CONTENT
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = 1600  // 上端からの距離
+
+                // Android バージョンに応じたフラグの設定
+                flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+
+                // オーバーレイウィンドウのタイプ設定
+                type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
                 }
-                setPadding(0, 8, 0, 8)
 
-                overlayView?.addView(this)
+                format = PixelFormat.TRANSLUCENT
+            }
+
+            try {
+                windowManager.addView(overlayView, params)
+                isShowing = true
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
-        // WindowManagerのパラメータ設定
-        val params = WindowManager.LayoutParams().apply {
-            width = WRAP_CONTENT
-            height = WRAP_CONTENT
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            y = 400  // 画面下端からの距離
-
-            flags = FLAG_NOT_FOCUSABLE or FLAG_NOT_TOUCH_MODAL
-
-            // Android 8.0以降はTYPE_APPLICATION_OVERLAYを使用
-            type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                TYPE_APPLICATION_OVERLAY
-            } else {
-                @Suppress("DEPRECATION")
-                TYPE_SYSTEM_ALERT  // 8.0未満ではTYPE_SYSTEM_ALERTを使用
-            }
-
-            format = PixelFormat.TRANSLUCENT
-        }
-
-        try {
-            overlayView?.let { windowManager.addView(it, params) }
-
-            // 3秒後に非表示
-            handler.postDelayed({ hide() }, 3000)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        // メッセージの更新
+        textView?.post {
+            textView?.text = message
         }
     }
 
     fun hide() {
-        try {
-            overlayView?.let {
-                windowManager.removeView(it)
-                overlayView = null
+        if (isShowing) {
+            try {
+                windowManager.removeView(overlayView)
+                isShowing = false
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        }
+    }
+
+    fun updateMessage(message: String) {
+        textView?.post {
+            textView?.text = message
         }
     }
 }

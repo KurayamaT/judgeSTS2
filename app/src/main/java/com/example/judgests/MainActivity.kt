@@ -346,4 +346,6 @@ class MainActivity : AppCompatActivity() {
         // Activityが破棄されても計測は継続させるため、stopRecordingは呼ばない
         LocalBroadcastManager.getInstance(this).unregisterReceiver(accelerometerDataReceiver)
     }
+
+
 }
