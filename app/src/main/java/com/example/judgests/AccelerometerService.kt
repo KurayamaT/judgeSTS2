@@ -59,6 +59,12 @@ class AccelerometerService : Service(), SensorEventListener {
     private val STORAGE_WRITE_INTERVAL = 1000L
     private val FIREBASE_WRITE_INTERVAL = 10000L  // Firebaseへの送信を10秒間隔に変更
 
+    private var lastSensorTimestamp: Long = 0
+    private val sensorTimestamps = ArrayList<Long>(1000) // デバッグ用
+    private var initNanoTime: Long = 0
+    private var initSystemTime: Long = 0
+
+
     companion object {
         private const val CHANNEL_ID = "AccelerometerServiceChannel"
         private const val NOTIFICATION_ID = 1
@@ -75,27 +81,32 @@ class AccelerometerService : Service(), SensorEventListener {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-        // SensorManagerの初期化
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        // システム時間とセンサーのタイムスタンプの初期同期
+        initNanoTime = System.nanoTime()
+        initSystemTime = System.currentTimeMillis()
 
-        // センサーを取得
-        sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)!!
-
-
-        // Android 8.0 (API 26) 以降では、より詳細なセンサー設定が可能
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            sensorManager.registerListener(
-                this,
-                sensor,
-                SENSOR_SAMPLING_PERIOD_US, // サンプリング周期を設定
-                maxReportLatencyUs         // レイテンシー設定で負荷軽減
-            )
-        } else {
-            // 古いバージョンでは近似値を設定
+            // サンプリングレートとバッチサイズを明示的に設定
+            val samplingPeriodUs = 10000 // 100Hz = 10ms
+            val maxReportLatencyUs = samplingPeriodUs / 2 // バッチ遅延を半分に設定
+
             sensorManager.registerListener(
                 this,
                 accelerometer,
-                SensorManager.SENSOR_DELAY_GAME  // 約20ms (50Hz) - FASTEST(0ms)より適切
+                samplingPeriodUs,
+                maxReportLatencyUs
+            )
+
+            // FIFOサイズの確認（デバッグ用）
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                val fifoSize = accelerometer?.fifoMaxEventCount ?: 0
+                Log.d("Sensor", "FIFO size: $fifoSize events")
+            }
+        } else {
+            sensorManager.registerListener(
+                this,
+                accelerometer,
+                SensorManager.SENSOR_DELAY_FASTEST
             )
         }
     }
@@ -111,12 +122,20 @@ class AccelerometerService : Service(), SensorEventListener {
     private fun startRecording() {
         if (!isRecording) {
             isRecording = true
+
+            initNanoTime = System.nanoTime()
+            initSystemTime = System.currentTimeMillis()
+            lastSensorTimestamp = 0
+            sensorTimestamps.clear()
+
             recordingStartTime = System.currentTimeMillis()
             sessionStartTime = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault())
                 .format(Date())
             lastWriteTime = System.currentTimeMillis()
             lastStorageWriteTime = System.currentTimeMillis()  // 追加
             cumulativeDataSize = 0L
+
+
 
             // ファイルのヘッダーを作成
             initializeStorageFile()
@@ -191,45 +210,55 @@ class AccelerometerService : Service(), SensorEventListener {
 
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type == Sensor.TYPE_ACCELEROMETER && isRecording) {
-            val currentTime = System.currentTimeMillis()
+            val nanoTime = event.timestamp
+
+            // 正確なシステム時間に変換
+            val elapsedNanos = nanoTime - initNanoTime
+            val currentTime = initSystemTime + (elapsedNanos / 1_000_000)
+
+            // サンプリング間隔の監視（デバッグ用）
+            if (lastSensorTimestamp != 0L) {
+                val interval = nanoTime - lastSensorTimestamp
+                sensorTimestamps.add(interval)
+
+                // 100サンプルごとに統計情報を出力
+                if (sensorTimestamps.size >= 100) {
+                    val avgInterval = sensorTimestamps.average() / 1_000_000 // ms単位
+                    val minInterval = sensorTimestamps.min() / 1_000_000
+                    val maxInterval = sensorTimestamps.max() / 1_000_000
+                    Log.d("Sampling", "Avg: ${avgInterval}ms, Min: ${minInterval}ms, Max: ${maxInterval}ms")
+                    sensorTimestamps.clear()
+                }
+            }
+            lastSensorTimestamp = nanoTime
+
             currentX = event.values[0]
             currentY = event.values[1]
             currentZ = event.values[2]
 
-            // データラインを作成
             val dataLine = "$currentTime,$currentX,$currentY,$currentZ\n"
 
-            // Firebaseバッファに追加
+            // バッファリング処理
             dataBuffer.append(dataLine)
-
-            // ストレージバッファに追加
             storageBuffer.add(dataLine)
 
             cumulativeDataSize += dataLine.length
 
             // ストレージへの書き込みを1秒ごとに実行
-            if (currentTime - lastStorageWriteTime >= STORAGE_WRITE_INTERVAL) {
+            val currentSystemTime = System.currentTimeMillis()
+            if (currentSystemTime - lastStorageWriteTime >= STORAGE_WRITE_INTERVAL) {
                 saveBufferToStorage()
-                lastStorageWriteTime = currentTime
+                lastStorageWriteTime = currentSystemTime
             }
 
-            // Firebaseへの送信（30秒間隔）
-            if (currentTime - lastWriteTime >= FIREBASE_WRITE_INTERVAL) {
+            // Firebaseへの送信
+            if (currentSystemTime - lastWriteTime >= FIREBASE_WRITE_INTERVAL) {
                 saveBufferToFirebase()
-                lastWriteTime = currentTime
+                lastWriteTime = currentSystemTime
             }
 
             // display on Main screen.
             sendAccelerometerData(currentX, currentY, currentZ)
-
-            event?.let {
-                val timestampInMs = event.timestamp / 1_000_000  // ナノ秒からミリ秒に変換
-                lastTimestamp?.let { last ->
-                    val interval = timestampInMs - last
-                    Log.d("SensorSampling", "Interval: ${interval}ms")
-                }
-                lastTimestamp = timestampInMs
-            }
         }
     }
 
@@ -411,5 +440,24 @@ class AccelerometerService : Service(), SensorEventListener {
             putExtra("Z", z)
         }
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+    }
+
+    private fun checkDeviceStatus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val isPowerSaveMode = powerManager.isPowerSaveMode
+            Log.d("Device", "Power save mode: $isPowerSaveMode")
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                val cpuFreq = File("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
+                if (cpuFreq.exists()) {
+                    Log.d("CPU", "Current frequency: ${cpuFreq.readText().trim()}")
+                }
+            } catch (e: Exception) {
+                Log.e("CPU", "Error reading CPU frequency", e)
+            }
+        }
     }
 }
