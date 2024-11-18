@@ -54,18 +54,14 @@ class AccelerometerService : Service(), SensorEventListener {
         val z: Float
     )
 
-    // デバッグ用の変数を追加
-    private var lastDebugTime = 0L
-    private var sampleCounter = 0
-
     // バッファリング用のデータ構造
     private val dataBuffer = ArrayDeque<AccelerometerDataPoint>(1000)
     private val storageBuffer = ArrayDeque<AccelerometerDataPoint>(1000)
     private val bufferLock = ReentrantLock()
 
     // 時間間隔の定数
-    private val STORAGE_WRITE_INTERVAL = 1000L  // 1秒
-    private val FIREBASE_WRITE_INTERVAL = 1000L // 1秒
+    private val STORAGE_WRITE_INTERVAL = 5000L  // 1秒
+    private val FIREBASE_WRITE_INTERVAL = 5000L // 1秒
 
     // タイムスタンプ管理
     private var lastWriteTime = 0L
@@ -81,10 +77,13 @@ class AccelerometerService : Service(), SensorEventListener {
         private const val CHANNEL_ID = "AccelerometerServiceChannel"
         private const val NOTIFICATION_ID = 1
         private const val WAKELOCK_TAG = "AccelerometerService::WakeLock"
-        private const val SENSOR_SAMPLING_PERIOD_US = 8260  // 実測値に基づく設定
+        private const val SENSOR_SAMPLING_PERIOD_US = 8334  // 実測値に基づく設定
         private const val MAX_REPORT_LATENCY_US = 50000
     }
 
+    private var lastSampleTime = 0L
+    private var sampleCount = 0
+    private var actualSamplingRate = 0.0
 
 
     @SuppressLint("WakelockTimeout")
@@ -160,11 +159,14 @@ class AccelerometerService : Service(), SensorEventListener {
             // ファイルのヘッダーを作成
             initializeStorageFile()
 
-
             // フォアグラウンドサービス開始
             val notification = createNotification()
             startForeground(NOTIFICATION_ID, notification)
 
+            // メール通知を送信
+            sessionStartTime?.let { sessionId ->
+                MeasurementNotifier(applicationContext).sendStartNotification(sessionId)
+            }
             // WakeLock取得
             wakeLock?.apply {
                 if (!isHeld) {
@@ -178,7 +180,7 @@ class AccelerometerService : Service(), SensorEventListener {
             // 初期メッセージを表示
             statusOverlay.show("📊 ACC計測開始")
 
-            Log.d("Recording", "Started new session at: $sessionStartTime")
+
         }
     }
 
@@ -226,19 +228,8 @@ class AccelerometerService : Service(), SensorEventListener {
             val nanoTime = event.timestamp
             val elapsedNanos = nanoTime - initNanoTime
             val currentTime = initSystemTime + (elapsedNanos / 1_000_000)
+            sampleCount++
 
-            // デバッグ用のカウント処理
-            sampleCounter++
-            if (currentTime - lastDebugTime >= 1000) {  // 1秒ごとに出力
-                Log.d("Sensor", """
-                デバッグ情報:
-                - 1秒間のサンプル数: $sampleCounter
-                - Timestamp差分: ${(nanoTime - lastSensorTimestamp) / 1000000.0}ms
-                - 現在時刻: ${SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date(currentTime))}
-            """.trimIndent())
-                sampleCounter = 0
-                lastDebugTime = currentTime
-            }
 
             lastSensorTimestamp = nanoTime
 
@@ -310,6 +301,7 @@ class AccelerometerService : Service(), SensorEventListener {
         }
     }
 
+    @SuppressLint("DefaultLocale")
     private fun saveBufferToFirebase() {
         var dataToSend: List<AccelerometerDataPoint>
 
@@ -328,17 +320,19 @@ class AccelerometerService : Service(), SensorEventListener {
             .child(sessionStartTime!!)
             .child(currentTime.toString())
 
+        actualSamplingRate = (sampleCount / 5.0)  // 1秒あたりのサンプル数を計算
+        sampleCount = 0
+
         reference.setValue(batchData)
             .addOnSuccessListener {
                 val elapsedTime = currentTime - recordingStartTime
                 val formattedElapsedTime = formatElapsedTime(elapsedTime)
-                val dataSizeKB = String.format("%.2f", cumulativeDataSize / 1024.0)
-
+                val dataSizeMB = String.format("%.2f", cumulativeDataSize / (1024.0 * 1024.0))
                 val message = """
                 📊 ACC計測中
                 ⏱ 経過時間: $formattedElapsedTime
-                💾 データ: ${dataSizeKB}KB
-                📈 サンプル数: ${dataToSend.size}
+                💾 累計データ: ${dataSizeMB}MB
+                📊 sampling: ${String.format("%.1f", actualSamplingRate)}Hz
             """.trimIndent()
 
                 // show()をupdateMessage()に変更
