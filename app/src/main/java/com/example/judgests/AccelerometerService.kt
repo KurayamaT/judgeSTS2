@@ -23,11 +23,11 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.firebase.database.FirebaseDatabase
 import java.io.File
 import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import kotlin.time.Duration.Companion.milliseconds
 import java.util.ArrayDeque
-import java.util.concurrent.TimeUnit
+import java.util.Calendar
+import java.util.TimeZone
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -135,10 +135,12 @@ class AccelerometerService : Service(), SensorEventListener {
         if (!isRecording) {
             isRecording = true
 
-            // セッション開始時の正確な時間を記録
-            sessionStartTimeMillis = System.currentTimeMillis()
-            sessionStartTime = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault())
-                .format(Date(sessionStartTimeMillis))
+            // セッション開始時の正確な時間を記録（JSTで取得）
+            val calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Tokyo"))
+            sessionStartTimeMillis = calendar.timeInMillis
+            sessionStartTime = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault()).apply {
+                timeZone = TimeZone.getTimeZone("Asia/Tokyo")
+            }.format(calendar.time)
 
             // 初期化
             initNanoTime = System.nanoTime()
