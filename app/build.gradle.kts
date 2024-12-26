@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
+    id("com.google.firebase.appdistribution")  // 追加
+
 }
 
 
@@ -27,6 +29,14 @@ android {
                 "proguard-rules.pro"
             )
         }
+    }
+
+// Firebase App Distribution の設定を buildTypes の外に移動
+    firebaseAppDistribution {
+        releaseNotes = "First release"
+        testers = "tbr.kurayama@gmail.com,kakenhi.kurayama5@gmail.com"
+        appId = "1:686357189379:android:423a62bcac915443aecf36"
+        artifactPath = "release/app-release.apk"  // artifacts.add の代わりに artifactPath を使用
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8

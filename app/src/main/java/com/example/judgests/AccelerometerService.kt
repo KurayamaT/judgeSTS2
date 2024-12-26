@@ -25,8 +25,9 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit  // この行を修正
+import kotlin.time.Duration.Companion.milliseconds
 import java.util.ArrayDeque
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -36,6 +37,7 @@ class AccelerometerService : Service(), SensorEventListener {
     private lateinit var database: FirebaseDatabase
     private var wakeLock: PowerManager.WakeLock? = null
     private var sessionStartTime: String? = null
+    private var sessionStartTimeMillis: Long = 0L  // セッション開始時のシステム時間
     private var recordingStartTime: Long = 0L
 
     // 現在の加速度値を保持するプロパティ
@@ -60,8 +62,8 @@ class AccelerometerService : Service(), SensorEventListener {
     private val bufferLock = ReentrantLock()
 
     // 時間間隔の定数
-    private val STORAGE_WRITE_INTERVAL = 5000L  // 1秒
-    private val FIREBASE_WRITE_INTERVAL = 5000L // 1秒
+    private val STORAGE_WRITE_INTERVAL = 5000L
+    private val FIREBASE_WRITE_INTERVAL = 5000L
 
     // タイムスタンプ管理
     private var lastWriteTime = 0L
@@ -77,14 +79,13 @@ class AccelerometerService : Service(), SensorEventListener {
         private const val CHANNEL_ID = "AccelerometerServiceChannel"
         private const val NOTIFICATION_ID = 1
         private const val WAKELOCK_TAG = "AccelerometerService::WakeLock"
-        private const val SENSOR_SAMPLING_PERIOD_US = 8334  // 実測値に基づく設定
+        private const val SENSOR_SAMPLING_PERIOD_US = 8334
         private const val MAX_REPORT_LATENCY_US = 50000
     }
 
     private var lastSampleTime = 0L
     private var sampleCount = 0
     private var actualSamplingRate = 0.0
-
 
     @SuppressLint("WakelockTimeout")
     override fun onCreate() {
@@ -103,12 +104,6 @@ class AccelerometerService : Service(), SensorEventListener {
         ).apply {
             setReferenceCounted(false)
         }
-
-        // システム時間とセンサーのタイムスタンプの初期同期
-        initNanoTime = System.nanoTime()
-        initSystemTime = System.currentTimeMillis()
-
-        setupSensor()
     }
 
     private fun setupSensor() {
@@ -119,11 +114,6 @@ class AccelerometerService : Service(), SensorEventListener {
                 SENSOR_SAMPLING_PERIOD_US,
                 MAX_REPORT_LATENCY_US
             )
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                val fifoSize = accelerometer?.fifoMaxEventCount ?: 0
-                Log.d("Sensor", "FIFO size: $fifoSize events")
-            }
         } else {
             sensorManager.registerListener(
                 this,
@@ -145,15 +135,18 @@ class AccelerometerService : Service(), SensorEventListener {
         if (!isRecording) {
             isRecording = true
 
+            // セッション開始時の正確な時間を記録
+            sessionStartTimeMillis = System.currentTimeMillis()
+            sessionStartTime = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault())
+                .format(Date(sessionStartTimeMillis))
+
             // 初期化
             initNanoTime = System.nanoTime()
-            initSystemTime = System.currentTimeMillis()
+            initSystemTime = sessionStartTimeMillis
             lastSensorTimestamp = 0
-            recordingStartTime = System.currentTimeMillis()
-            sessionStartTime = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault())
-                .format(Date())
-            lastWriteTime = System.currentTimeMillis()
-            lastStorageWriteTime = System.currentTimeMillis()
+            recordingStartTime = sessionStartTimeMillis
+            lastWriteTime = sessionStartTimeMillis
+            lastStorageWriteTime = sessionStartTimeMillis
             cumulativeDataSize = 0L
 
             // ファイルのヘッダーを作成
@@ -167,6 +160,7 @@ class AccelerometerService : Service(), SensorEventListener {
             sessionStartTime?.let { sessionId ->
                 MeasurementNotifier(applicationContext).sendStartNotification(sessionId)
             }
+
             // WakeLock取得
             wakeLock?.apply {
                 if (!isHeld) {
@@ -179,8 +173,6 @@ class AccelerometerService : Service(), SensorEventListener {
 
             // 初期メッセージを表示
             statusOverlay.show("📊 ACC計測開始")
-
-
         }
     }
 
@@ -194,7 +186,6 @@ class AccelerometerService : Service(), SensorEventListener {
 
             // センサー登録解除
             sensorManager.unregisterListener(this)
-
 
             // WakeLock解放
             wakeLock?.apply {
@@ -227,10 +218,11 @@ class AccelerometerService : Service(), SensorEventListener {
         if (event.sensor.type == Sensor.TYPE_ACCELEROMETER && isRecording) {
             val nanoTime = event.timestamp
             val elapsedNanos = nanoTime - initNanoTime
-            val currentTime = initSystemTime + (elapsedNanos / 1_000_000)
+
+            // セッション開始時からの経過時間を計算して現在時刻を求める
+            val currentTime = sessionStartTimeMillis + (elapsedNanos / 1_000_000)
+
             sampleCount++
-
-
             lastSensorTimestamp = nanoTime
 
             val dataPoint = AccelerometerDataPoint(
@@ -265,7 +257,6 @@ class AccelerometerService : Service(), SensorEventListener {
         }
     }
 
-
     private fun initializeStorageFile() {
         try {
             val file = File(getExternalFilesDir(null), "${sessionStartTime}_accelerometer.csv")
@@ -294,7 +285,6 @@ class AccelerometerService : Service(), SensorEventListener {
             }
             file.appendText("$csvLines\n")
 
-            // データサイズの更新
             cumulativeDataSize += csvLines.length
         } catch (e: Exception) {
             Log.e("Storage", "Error writing to file", e)
@@ -320,7 +310,7 @@ class AccelerometerService : Service(), SensorEventListener {
             .child(sessionStartTime!!)
             .child(currentTime.toString())
 
-        actualSamplingRate = (sampleCount / 5.0)  // 1秒あたりのサンプル数を計算
+        actualSamplingRate = (sampleCount / 5.0)
         sampleCount = 0
 
         reference.setValue(batchData)
@@ -333,22 +323,22 @@ class AccelerometerService : Service(), SensorEventListener {
                 ⏱ 経過時間: $formattedElapsedTime
                 💾 累計データ: ${dataSizeMB}MB
                 📊 sampling: ${String.format("%.1f", actualSamplingRate)}Hz
-            """.trimIndent()
+                """.trimIndent()
 
-                // show()をupdateMessage()に変更
                 statusOverlay.updateMessage(message)
                 Log.d("Firebase", "Saved ${dataToSend.size} samples at: $currentTime")
             }
             .addOnFailureListener { e ->
                 Log.e("Firebase", "Error saving data", e)
-                // show()をupdateMessage()に変更
                 statusOverlay.updateMessage("❌ データ送信エラー")
             }
     }
+
     private fun formatElapsedTime(elapsedMillis: Long): String {
-        val hours = TimeUnit.MILLISECONDS.toHours(elapsedMillis)
-        val minutes = TimeUnit.MILLISECONDS.toMinutes(elapsedMillis) % 60
-        val seconds = TimeUnit.MILLISECONDS.toSeconds(elapsedMillis) % 60
+        val duration = elapsedMillis.milliseconds
+        val hours = duration.inWholeHours
+        val minutes = duration.inWholeMinutes % 60
+        val seconds = duration.inWholeSeconds % 60
         return String.format("%02d:%02d:%02d", hours, minutes, seconds)
     }
 
@@ -411,7 +401,6 @@ class AccelerometerService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        // 残っているデータを保存
         if (isRecording) {
             saveBufferToStorage()
             saveBufferToFirebase()
@@ -429,24 +418,5 @@ class AccelerometerService : Service(), SensorEventListener {
 
         // オーバーレイを非表示
         statusOverlay.hide()
-    }
-
-    private fun checkDeviceStatus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            val isPowerSaveMode = powerManager.isPowerSaveMode
-            Log.d("Device", "Power save mode: $isPowerSaveMode")
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            try {
-                val cpuFreq = File("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
-                if (cpuFreq.exists()) {
-                    Log.d("CPU", "Current frequency: ${cpuFreq.readText().trim()}")
-                }
-            } catch (e: Exception) {
-                Log.e("CPU", "Error reading CPU frequency", e)
-            }
-        }
     }
 }
