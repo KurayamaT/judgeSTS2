@@ -218,17 +218,11 @@ class AccelerometerService : Service(), SensorEventListener {
 
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type == Sensor.TYPE_ACCELEROMETER && isRecording) {
-            val nanoTime = event.timestamp
-            val elapsedNanos = nanoTime - initNanoTime
-
-            // セッション開始時からの経過時間を計算して現在時刻を求める
-            val currentTime = sessionStartTimeMillis + (elapsedNanos / 1_000_000)
-
-            sampleCount++
-            lastSensorTimestamp = nanoTime
+            // システム時刻を直接使用
+            val currentTime = System.currentTimeMillis()
 
             val dataPoint = AccelerometerDataPoint(
-                timestamp = currentTime,
+                timestamp = currentTime,  // この時刻が各データポイントのタイムスタンプになる
                 x = event.values[0],
                 y = event.values[1],
                 z = event.values[2]
@@ -303,13 +297,17 @@ class AccelerometerService : Service(), SensorEventListener {
             dataBuffer.clear()
         }
 
+        // currentTimeをシステム時刻から取得するのではなく
+        // sessionStartTimeからの経過時間として計算
         val currentTime = System.currentTimeMillis()
+
+        // データポイントのタイムスタンプをそのまま使用
         val batchData = dataToSend.joinToString("\n") { data ->
             "${data.timestamp},${data.x},${data.y},${data.z}"
         }
 
         val reference = database.getReference("SmartPhone_data")
-            .child(sessionStartTime!!)
+            .child(sessionStartTime!!)  // これは正しい（20241226150541）
             .child(currentTime.toString())
 
         actualSamplingRate = (sampleCount / 5.0)
