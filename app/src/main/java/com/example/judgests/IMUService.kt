@@ -12,7 +12,11 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -29,22 +33,29 @@ import kotlin.concurrent.withLock
 import kotlin.time.Duration.Companion.milliseconds
 
 class IMUService : Service(), SensorEventListener {
+
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
     private var gyroscope: Sensor? = null
     private var rotationVector: Sensor? = null
-
     private lateinit var database: FirebaseDatabase
     private var wakeLock: PowerManager.WakeLock? = null
     private var sessionStartTime: String? = null
     private var sessionStartTimeMillis: Long = 0L
-
     private var isRecording = false
+
+    // === GPS ===
+    private lateinit var locationManager: LocationManager
+    private var currentLat = 0.0
+    private var currentLon = 0.0
+    private var currentAlt = 0.0
+    private var currentAcc = 0.0
+
     private val dataBuffer = ArrayDeque<IMUDataPoint>(1000)
     private val storageBuffer = ArrayDeque<IMUDataPoint>(1000)
     private val bufferLock = ReentrantLock()
 
-    // センサーデータ格納変数
+    // 現在値保持
     private var currentAx = 0f; private var currentAy = 0f; private var currentAz = 0f
     private var currentGx = 0f; private var currentGy = 0f; private var currentGz = 0f
     private var currentQw = 1f; private var currentQx = 0f; private var currentQy = 0f; private var currentQz = 0f
@@ -71,15 +82,42 @@ class IMUService : Service(), SensorEventListener {
         val qw: Float, val qx: Float, val qy: Float, val qz: Float
     )
 
-    @SuppressLint("WakelockTimeout")
+    // === GPS リスナー ===
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            currentLat = location.latitude
+            currentLon = location.longitude
+            currentAlt = location.altitude
+            currentAcc = location.accuracy.toDouble()
+        }
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+        override fun onProviderEnabled(provider: String) {}
+        override fun onProviderDisabled(provider: String) {}
+    }
+
+    @SuppressLint("WakelockTimeout", "MissingPermission")
     override fun onCreate() {
         super.onCreate()
+
         statusOverlay = StatusOverlay(applicationContext)
         database = FirebaseDatabase.getInstance()
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         rotationVector = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+
+        // === GPS初期化 ===
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        try {
+            locationManager.requestLocationUpdates(
+                LocationManager.GPS_PROVIDER,
+                1000L, // 1秒ごと
+                0f,
+                locationListener
+            )
+        } catch (e: SecurityException) {
+            Log.e("IMUService", "GPS permission missing", e)
+        }
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "IMUService::WakeLock").apply {
@@ -115,7 +153,7 @@ class IMUService : Service(), SensorEventListener {
         startForeground(NOTIFICATION_ID, createNotification())
         wakeLock?.acquire()
         setupSensors()
-        statusOverlay.show("📊 IMU計測開始")
+        statusOverlay.show("📊 IMU+GPS計測開始")
     }
 
     private fun stopRecording() {
@@ -125,9 +163,10 @@ class IMUService : Service(), SensorEventListener {
         saveBufferToFirebase()
 
         sensorManager.unregisterListener(this)
+        locationManager.removeUpdates(locationListener)
         wakeLock?.release()
 
-        statusOverlay.updateMessage("📊 IMU計測停止")
+        statusOverlay.updateMessage("📊 IMU+GPS計測停止")
         mainHandler.postDelayed({ statusOverlay.hide() }, 2000)
 
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -178,7 +217,7 @@ class IMUService : Service(), SensorEventListener {
         val file = File(getExternalFilesDir(null), "${sessionStartTime}_imu.csv")
         if (!file.exists()) {
             file.createNewFile()
-            file.writeText("Timestamp(ms),ax,ay,az,gx,gy,gz,qw,qx,qy,qz\n")
+            file.writeText("Timestamp(ms),ax,ay,az,gx,gy,gz,qw,qx,qy,qz,lat,lon,alt,acc\n")
         }
     }
 
@@ -191,7 +230,9 @@ class IMUService : Service(), SensorEventListener {
         try {
             val file = File(getExternalFilesDir(null), "${sessionStartTime}_imu.csv")
             val lines = list.joinToString("\n") {
-                "${it.timestamp},${it.ax},${it.ay},${it.az},${it.gx},${it.gy},${it.gz},${it.qw},${it.qx},${it.qy},${it.qz}"
+                "${it.timestamp},${it.ax},${it.ay},${it.az}," +
+                        "${it.gx},${it.gy},${it.gz},${it.qw},${it.qx},${it.qy},${it.qz}," +
+                        "$currentLat,$currentLon,$currentAlt,$currentAcc"
             }
             file.appendText("$lines\n")
         } catch (e: Exception) {
@@ -208,13 +249,21 @@ class IMUService : Service(), SensorEventListener {
 
         val currentTime = System.currentTimeMillis()
         val batchData = list.joinToString("\n") {
-            "${it.timestamp},${it.ax},${it.ay},${it.az},${it.gx},${it.gy},${it.gz},${it.qw},${it.qx},${it.qy},${it.qz}"
+            "${it.timestamp},${it.ax},${it.ay},${it.az}," +
+                    "${it.gx},${it.gy},${it.gz},${it.qw},${it.qx},${it.qy},${it.qz}," +
+                    "$currentLat,$currentLon,$currentAlt,$currentAcc"
         }
 
-        val ref = database.getReference("SmartPhone_data_IMU").child(sessionStartTime!!).child(currentTime.toString())
+        val ref = database.getReference("SmartPhone_data_IMU_GPS")
+            .child(sessionStartTime!!)
+            .child(currentTime.toString())
+
         ref.setValue(batchData).addOnSuccessListener {
             val elapsed = (currentTime - sessionStartTimeMillis).milliseconds
-            val msg = "⏱ ${String.format("%02d:%02d:%02d", elapsed.inWholeHours, elapsed.inWholeMinutes % 60, elapsed.inWholeSeconds % 60)} 計測中"
+            val msg = """
+                ⏱ ${String.format("%02d:%02d:%02d", elapsed.inWholeHours, elapsed.inWholeMinutes % 60, elapsed.inWholeSeconds % 60)} 計測中
+                📍 Lat:${"%.5f".format(currentLat)} Lon:${"%.5f".format(currentLon)}
+            """.trimIndent()
             statusOverlay.updateMessage(msg)
         }.addOnFailureListener {
             statusOverlay.updateMessage("❌ 送信エラー")
@@ -230,10 +279,12 @@ class IMUService : Service(), SensorEventListener {
             putExtra("AX", ax); putExtra("AY", ay); putExtra("AZ", az)
             putExtra("GX", gx); putExtra("GY", gy); putExtra("GZ", gz)
             putExtra("QW", qw); putExtra("QX", qx); putExtra("QY", qy); putExtra("QZ", qz)
+            putExtra("LAT", currentLat.toFloat())
+            putExtra("LON", currentLon.toFloat())
+            putExtra("ALT", currentAlt.toFloat())
         }
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
-
 
     private fun createNotification(): Notification {
         createNotificationChannel()
@@ -241,8 +292,8 @@ class IMUService : Service(), SensorEventListener {
         val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("IMUセンサー記録中")
-            .setContentText("加速度・ジャイロ・姿勢を計測中")
+            .setContentTitle("IMU+GPSセンサー記録中")
+            .setContentText("加速度・角速度・姿勢・位置情報を計測中")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -251,19 +302,22 @@ class IMUService : Service(), SensorEventListener {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "IMU Service", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(CHANNEL_ID, "IMU+GPS Service", NotificationManager.IMPORTANCE_LOW)
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
     override fun onBind(intent: Intent?): IBinder? = null
+
     override fun onDestroy() {
         if (isRecording) {
             saveBufferToStorage(); saveBufferToFirebase()
         }
         sensorManager.unregisterListener(this)
+        locationManager.removeUpdates(locationListener)
         wakeLock?.release()
         statusOverlay.hide()
         super.onDestroy()

@@ -158,11 +158,6 @@ class AccelerometerService : Service(), SensorEventListener {
             val notification = createNotification()
             startForeground(NOTIFICATION_ID, notification)
 
-            // メール通知を送信
-            sessionStartTime?.let { sessionId ->
-                MeasurementNotifier(applicationContext).sendStartNotification(sessionId)
-            }
-
             // WakeLock取得
             wakeLock?.apply {
                 if (!isHeld) {

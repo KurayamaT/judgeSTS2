@@ -248,7 +248,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // === 実行時権限リクエスト ===
     private fun requestPermissionsIfNeeded() {
         val permissionsToRequest = mutableListOf<String>()
 
@@ -265,12 +264,23 @@ class MainActivity : AppCompatActivity() {
             permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        // GPS位置情報（IMU＋GPS計測用）
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+
         // 権限リクエスト実行
         if (permissionsToRequest.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, permissionsToRequest.toTypedArray(), 101)
         }
 
-
+        // バッテリー最適化除外（バックグラウンド実行の安定化）
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
             if (!pm.isIgnoringBatteryOptimizations(packageName)) {
@@ -279,13 +289,14 @@ class MainActivity : AppCompatActivity() {
                 startActivity(intent)
             }
         }
-
     }
+
 
 
 
     override fun onDestroy() {
         LocalBroadcastManager.getInstance(this).unregisterReceiver(imuReceiver)
+        orientationView.removeCallbacks(null)
         super.onDestroy()
     }
 }
