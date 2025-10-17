@@ -1,351 +1,291 @@
 package com.example.judgests
 
 import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
-import android.graphics.Color
-import android.os.Build
 import android.os.Bundle
 import android.widget.Button
-import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.github.mikephil.charting.charts.LineChart
-import com.github.mikephil.charting.components.Description
-import com.github.mikephil.charting.components.XAxis
+import com.github.mikephil.charting.components.Legend
 import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
-import com.github.mikephil.charting.interfaces.datasets.ILineDataSet
-import android.net.Uri
-import android.provider.Settings
-
+import com.github.mikephil.charting.utils.ColorTemplate
+import java.lang.Math.copySign
+import kotlin.math.*
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var startButton: Button
-    private lateinit var stopButton: Button
     private lateinit var chart: LineChart
-    private lateinit var accelerometerDataReceiver: BroadcastReceiver
+    private lateinit var btnStart: Button
+    private lateinit var btnStop: Button
+    private lateinit var btnAccel: Button
+    private lateinit var btnGyro: Button
+    private lateinit var btnOrient: Button
 
-    // 最大表示データ数を300に減らしつつ、間引きを増やして実質的な表示時間は維持
-    private val MAX_ENTRIES = 5000  // 500から300に減らす
-    private var xEntries = ArrayList<Entry>(MAX_ENTRIES)  // 初期容量を指定
-    private var yEntries = ArrayList<Entry>(MAX_ENTRIES)  // パフォーマンス改善
-    private var zEntries = ArrayList<Entry>(MAX_ENTRIES)  // GCの削減
-    private var timeCounter = 1000f
-
-    // データの間引きを増やす
-    private var updateCounter = 0
-    private val UPDATE_INTERVAL = 10  // 5から10に変更（表示更新頻度を半分に）
-
-    // Toast用のカスタムクラスで再利用（メモリ効率化）
-    private val toastHelper by lazy {
-        object {
-            private var currentToast: Toast? = null
-
-            fun showToast(context: Context, message: String) {
-                currentToast?.cancel()
-                currentToast = Toast.makeText(context, message, Toast.LENGTH_SHORT)
-                currentToast?.show()
-            }
-        }
-    }
-
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        if (permissions.all { it.value }) {
-            startRecordingService()
-        } else {
-            toastHelper.showToast(this, "必要な権限が許可されていません")
-        }
-    }
-
-    private val overlayPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (!Settings.canDrawOverlays(this)) {
-                Toast.makeText(
-                    this,
-                    "オーバーレイ表示の権限が必要です",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-    }
+    private var currentMode = "ACCEL" // ACCEL / GYRO / ORIENT
+    private var timeIndex = 0f
+    private val maxVisiblePoints = 200
+    private lateinit var orientationView: OrientationView
 
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Initialize UI elements
-        startButton = findViewById(R.id.startButton)
-        stopButton = findViewById(R.id.stopButton)
-        chart = findViewById(R.id.accelerometerChart)
+        orientationView = findViewById(R.id.orientationView)
+
+
+        requestPermissionsIfNeeded()   // ✅ これを追加
+
+        chart = findViewById(R.id.chartIMU)
+        btnStart = findViewById(R.id.btnStart)
+        btnStop = findViewById(R.id.btnStop)
+        btnAccel = findViewById(R.id.btnAccel)
+        btnGyro = findViewById(R.id.btnGyro)
+        btnOrient = findViewById(R.id.btnOrient)
 
         setupChart()
+        resetChart("加速度 (m/s²)", intArrayOf(
+            ColorTemplate.COLORFUL_COLORS[0],
+            ColorTemplate.COLORFUL_COLORS[1],
+            ColorTemplate.COLORFUL_COLORS[2]
+        ))
 
-        startButton.setOnClickListener {
-            startRecording()
-        }
-
-        stopButton.setOnClickListener {
-            stopRecording()
-        }
-
-        stopButton.isEnabled = false
-
-        accelerometerDataReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                intent?.let {
-                    val x = it.getFloatExtra("X", 0f)
-                    val y = it.getFloatExtra("Y", 0f)
-                    val z = it.getFloatExtra("Z", 0f)
-                    // updateAccelerometerData(x, y, z) を削除
-
-                    // グラフは間引いて更新
-                    updateCounter++
-                    if (updateCounter >= UPDATE_INTERVAL) {
-                        updateChart(x, y, z)
-                        updateCounter = 0
-                    }
-                }
+        // ==== 計測開始 ====
+        btnStart.setOnClickListener {
+            // オーバーレイ許可がなければ設定画面へ誘導して終了（戻ってきたらもう一度押してもらう）
+            if (!Settings.canDrawOverlays(this)) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+                return@setOnClickListener
             }
+
+            val intent = Intent(this, IMUService::class.java).apply {
+                action = "START_RECORDING"
+            }
+            startService(intent) // Foreground化はサービス内で実施
         }
-        checkOverlayPermission()
+
+// ==== 計測停止 ====
+        btnStop.setOnClickListener {
+            val intent = Intent(this, IMUService::class.java).apply {
+                action = "STOP_RECORDING"
+            }
+            startService(intent)
+        }
+
+// ==== グラフ切り替え ====
+        btnAccel.setOnClickListener {
+            currentMode = "ACCEL"
+            resetChart("加速度 (m/s²)", intArrayOf(
+                ColorTemplate.COLORFUL_COLORS[0],
+                ColorTemplate.COLORFUL_COLORS[1],
+                ColorTemplate.COLORFUL_COLORS[2]
+            ))
+        }
+        btnGyro.setOnClickListener {
+            currentMode = "GYRO"
+            resetChart("角速度 (°/s)", intArrayOf(
+                ColorTemplate.COLORFUL_COLORS[3],
+                ColorTemplate.COLORFUL_COLORS[4],
+                ColorTemplate.COLORFUL_COLORS[0]
+            ))
+        }
+        btnOrient.setOnClickListener {
+            currentMode = "ORIENT"
+            resetChart("姿勢角 (°)", intArrayOf(
+                ColorTemplate.COLORFUL_COLORS[1],
+                ColorTemplate.COLORFUL_COLORS[2],
+                ColorTemplate.COLORFUL_COLORS[3]
+            ))
+        }
+
+
+        LocalBroadcastManager.getInstance(this)
+            .registerReceiver(imuReceiver, IntentFilter("IMU_DATA"))
     }
 
+    // === チャート初期設定 ===
     private fun setupChart() {
-        // チャートの基本設定
-        chart.apply {
-            setTouchEnabled(true)
-            isDragEnabled = true
-            setScaleEnabled(true)
-            setPinchZoom(true)
-            setDrawGridBackground(false)
-
-            // 初期表示時から最大幅で表示するための設定
-            setVisibleXRangeMaximum(MAX_ENTRIES.toFloat())
-            setVisibleXRangeMinimum(MAX_ENTRIES.toFloat())  // これを追加
-
-            // X軸の初期表示範囲を設定
-            moveViewToX(0f)  // これを追加
-
-            // 説明テキストを非表示
-            description = Description().apply {
-                text = ""
-            }
-
-            // X軸の設定
-            xAxis.apply {
-                position = XAxis.XAxisPosition.BOTTOM
-                textColor = Color.BLACK
-                setDrawGridLines(true)
-                setAvoidFirstLastClipping(true)
-
-                // 目盛りの間隔を1000単位に設定
-                granularity = 1000f
-                // 最小値を1000に設定
-                axisMinimum = 1000f
-            }
-
-            // 初期表示範囲の設定
-            setVisibleXRangeMaximum(MAX_ENTRIES.toFloat())
-            setVisibleXRangeMinimum(MAX_ENTRIES.toFloat())
-            moveViewToX(1000f)  // 初期位置を1000からスタート
-
-
-            // 左Y軸の設定
-            axisLeft.apply {
-                textColor = Color.BLACK
-                setDrawGridLines(true)
-                axisMaximum = 15f
-                axisMinimum = -15f
-            }
-
-            // 右Y軸を非表示
-            axisRight.isEnabled = false
-
-            // 初期データセットの作成
-            val dataSets = ArrayList<ILineDataSet>()
-
-            // X軸データセット（赤）
-            val xDataSet = LineDataSet(ArrayList(), "X-axis").apply {
-                color = Color.RED
-                setDrawCircles(false)
-                setDrawValues(false)
-                lineWidth = 2f
-            }
-
-            // Y軸データセット（緑）
-            val yDataSet = LineDataSet(ArrayList(), "Y-axis").apply {
-                color = Color.GREEN
-                setDrawCircles(false)
-                setDrawValues(false)
-                lineWidth = 2f
-            }
-
-            // Z軸データセット（青）
-            val zDataSet = LineDataSet(ArrayList(), "Z-axis").apply {
-                color = Color.BLUE
-                setDrawCircles(false)
-                setDrawValues(false)
-                lineWidth = 2f
-            }
-
-            dataSets.add(xDataSet)
-            dataSets.add(yDataSet)
-            dataSets.add(zDataSet)
-
-            // データの設定
-            data = LineData(dataSets)
+        chart.data = LineData()
+        chart.legend.isEnabled = true
+        chart.legend.horizontalAlignment = Legend.LegendHorizontalAlignment.CENTER
+        chart.description.isEnabled = false
+        chart.axisLeft.setDrawGridLines(true)
+        chart.axisRight.isEnabled = false
+        chart.xAxis.setDrawGridLines(false)
+        chart.setAutoScaleMinMaxEnabled(false) // ← これを必ず追加
+        chart.xAxis.apply {
+            setDrawGridLines(false)
+            granularity = 1f
+            labelRotationAngle = 0f
+            textSize = 10f
         }
+        chart.setAutoScaleMinMaxEnabled(false)
+
+
     }
 
-    private fun updateChart(x: Float, y: Float, z: Float) {
-        timeCounter += UPDATE_INTERVAL.toFloat()  // 時間軸も間引きに合わせて調整
+    private fun resetChart(label: String, colors: IntArray) {
+        val data = LineData()
+        val labels = arrayOf("X", "Y", "Z")
+        for (i in 0..2) {
+            val set = LineDataSet(null, "${label}-${labels[i]}")
+            set.lineWidth = 2f
+            set.setDrawCircles(false)
+            set.color = colors[i % colors.size]
+            data.addDataSet(set)
+        }
+        chart.data = data
 
-        // エントリーの追加
-        xEntries.add(Entry(timeCounter, x))
-        yEntries.add(Entry(timeCounter, y))
-        zEntries.add(Entry(timeCounter, z))
-
-        // 最大数を超えた場合、古いデータを削除
-        if (xEntries.size > MAX_ENTRIES) {
-            xEntries.removeAt(0)
-            yEntries.removeAt(0)
-            zEntries.removeAt(0)
+        // ✅ Y軸スケール固定（モードごとに範囲設定）
+        when (currentMode) {
+            "ACCEL" -> {
+                chart.axisLeft.axisMinimum = -20f
+                chart.axisLeft.axisMaximum = 20f
+            }
+            "GYRO" -> {
+                chart.axisLeft.axisMinimum = -500f
+                chart.axisLeft.axisMaximum = 500f
+            }
+            "ORIENT" -> {
+                chart.axisLeft.axisMinimum = -180f
+                chart.axisLeft.axisMaximum = 180f
+            }
         }
 
-        // データセットの更新
-        val dataSets = ArrayList<ILineDataSet>()
-
-        dataSets.add(LineDataSet(xEntries, "X-axis").apply {
-            color = Color.RED
-            setDrawCircles(false)
-            setDrawValues(false)
-            lineWidth = 2f
-            mode = LineDataSet.Mode.CUBIC_BEZIER  // 線を滑らかに
-        })
-
-        dataSets.add(LineDataSet(yEntries, "Y-axis").apply {
-            color = Color.GREEN
-            setDrawCircles(false)
-            setDrawValues(false)
-            lineWidth = 2f
-            mode = LineDataSet.Mode.CUBIC_BEZIER  // 線を滑らかに
-        })
-
-        dataSets.add(LineDataSet(zEntries, "Z-axis").apply {
-            color = Color.BLUE
-            setDrawCircles(false)
-            setDrawValues(false)
-            lineWidth = 2f
-            mode = LineDataSet.Mode.CUBIC_BEZIER  // 線を滑らかに
-        })
-
-        chart.data = LineData(dataSets)
-
-        // 表示範囲の更新（常にMAX_ENTRIESの幅を維持）
-        chart.setVisibleXRangeMaximum(MAX_ENTRIES.toFloat())
-        chart.setVisibleXRangeMinimum(MAX_ENTRIES.toFloat())
-
-        // 最新のデータが見えるようにスクロール（範囲を維持したまま）
-        if (timeCounter > MAX_ENTRIES) {
-            chart.moveViewToX(timeCounter - MAX_ENTRIES)
-        }
-
-        // チャートの再描画
+        chart.axisRight.isEnabled = false
         chart.invalidate()
     }
-    override fun onResume() {
-        super.onResume()
-        LocalBroadcastManager.getInstance(this).registerReceiver(
-            accelerometerDataReceiver,
-            IntentFilter("ACCELEROMETER_DATA")
-        )
-    }
 
-    override fun onPause() {
-        super.onPause()
-        LocalBroadcastManager.getInstance(this).unregisterReceiver(accelerometerDataReceiver)
-    }
 
-    private fun startRecording() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val permissions = mutableListOf(
-                Manifest.permission.POST_NOTIFICATIONS,
-                Manifest.permission.FOREGROUND_SERVICE
-            ).apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    add(Manifest.permission.FOREGROUND_SERVICE_DATA_SYNC)
-                }
-            }.toTypedArray()
+    // === IMUデータ受信 ===
+    private val imuReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val ax = intent?.getFloatExtra("AX", 0f) ?: 0f
+            val ay = intent?.getFloatExtra("AY", 0f) ?: 0f
+            val az = intent?.getFloatExtra("AZ", 0f) ?: 0f
+            val gx = intent?.getFloatExtra("GX", 0f) ?: 0f
+            val gy = intent?.getFloatExtra("GY", 0f) ?: 0f
+            val gz = intent?.getFloatExtra("GZ", 0f) ?: 0f
+            val qw = intent?.getFloatExtra("QW", 1f) ?: 1f
+            val qx = intent?.getFloatExtra("QX", 0f) ?: 0f
+            val qy = intent?.getFloatExtra("QY", 0f) ?: 0f
+            val qz = intent?.getFloatExtra("QZ", 0f) ?: 0f
 
-            // 必要な権限が付与されているかチェック
-            val permissionsToRequest = permissions.filter {
-                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-            }.toTypedArray()
+            // === Android標準の安定化関数でクォータニオン→姿勢角 ===
+            val rotationMatrix = FloatArray(9)
+            val orientationAngles = FloatArray(3)
 
-            if (permissionsToRequest.isEmpty()) {
-                startRecordingService()
-            } else {
-                requestPermissionLauncher.launch(permissionsToRequest)
-            }
-        } else {
-            startRecordingService()
-        }
-    }
-
-    private fun startRecordingService() {
-        val serviceIntent = Intent(this, AccelerometerService::class.java).apply {
-            action = "START_RECORDING"
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
-        startButton.isEnabled = false
-        stopButton.isEnabled = true
-    }
-
-    private fun stopRecording() {
-        val serviceIntent = Intent(this, AccelerometerService::class.java).apply {
-            action = "STOP_RECORDING"
-        }
-        stopService(serviceIntent)
-        startButton.isEnabled = true
-        stopButton.isEnabled = false
-    }
-
-    private val OVERLAY_PERMISSION_REQUEST_CODE = 1234
-
-    private fun checkOverlayPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:$packageName")
+            // クォータニオン→回転行列に変換
+            android.hardware.SensorManager.getRotationMatrixFromVector(
+                rotationMatrix,
+                floatArrayOf(qx, qy, qz, qw)
             )
-            overlayPermissionLauncher.launch(intent)
+
+            // オイラー角（ラジアン）取得
+            android.hardware.SensorManager.getOrientation(rotationMatrix, orientationAngles)
+
+            // 各軸を度数に変換
+            var yaw = Math.toDegrees(orientationAngles[0].toDouble())   // 方位（Z軸）
+            var pitch = Math.toDegrees(orientationAngles[1].toDouble()) // 前後傾き（Y軸）
+            var roll = Math.toDegrees(orientationAngles[2].toDouble())  // 左右傾き（X軸）
+
+            // === 補正 ===
+            // Androidは左手座標系なので、自然な動きにするため符号を調整
+            pitch = -pitch       // 前後方向を反転（スマホを自分に向けて起こす→正）
+            roll = -roll         // 左右を反転（右に傾ける→正）
+            yaw = -yaw           // 水平回転を右手系に合わせる
+
+            // === グラフ更新 ===
+            val data = chart.data ?: return
+            if (data.dataSetCount == 0) return
+
+            timeIndex += 0.2f // サンプリング間隔
+
+            when (currentMode) {
+                "ACCEL" -> updateChartData(floatArrayOf(ax, ay, az), data)
+                "GYRO" -> updateChartData(floatArrayOf(gx, gy, gz), data)
+                "ORIENT" -> updateChartData(
+                    floatArrayOf(roll.toFloat(), pitch.toFloat(), yaw.toFloat()),
+                    data
+                )
+            }
+
+            chart.notifyDataSetChanged()
+            chart.setVisibleXRangeMaximum(maxVisiblePoints.toFloat() * 5)
+            chart.moveViewToX(timeIndex)
+
+            // === 3D描画ビューを更新 ===
+            orientationView.updateAngles(
+                roll.toFloat(),
+                pitch.toFloat(),
+                yaw.toFloat()
+            )
         }
+    }
+
+
+    private fun updateChartData(values: FloatArray, data: LineData) {
+        for (i in values.indices) {
+            val set = data.getDataSetByIndex(i)
+            data.addEntry(Entry(timeIndex, values[i]), i)
+            data.notifyDataChanged()
+        }
+    }
+
+    // === 実行時権限リクエスト ===
+    private fun requestPermissionsIfNeeded() {
+        val permissionsToRequest = mutableListOf<String>()
+
+        // ストレージ書き込み（データ保存）
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+
+        // 通知（Foreground Service用）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        // 権限リクエスト実行
+        if (permissionsToRequest.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, permissionsToRequest.toTypedArray(), 101)
+        }
+
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            }
+        }
+
     }
 
 
 
     override fun onDestroy() {
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(imuReceiver)
         super.onDestroy()
-        // Activityが破棄されても計測は継続させるため、stopRecordingは呼ばない
-        LocalBroadcastManager.getInstance(this).unregisterReceiver(accelerometerDataReceiver)
     }
-
-
 }

@@ -1,14 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:tools="http://schemas.android.com/tools"
-    xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- 権限設定 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />  <!-- 追加 -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
@@ -19,6 +20,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
 
+        <!-- メインアクティビティ -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -28,11 +30,21 @@
             </intent-filter>
         </activity>
 
+        <!-- 加速度サービス（旧） -->
         <service
             android:name=".AccelerometerService"
             android:foregroundServiceType="dataSync"
             android:exported="false"
             android:enabled="true"
-            android:stopWithTask="false"/>
+            android:stopWithTask="false" />
+
+        <!-- IMU サービス（新） -->
+        <service
+            android:name=".IMUService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:enabled="true"
+            tools:ignore="ForegroundServiceType" />
+        <!-- ↑ Lint誤検出を無視するための追記 -->
     </application>
 </manifest>

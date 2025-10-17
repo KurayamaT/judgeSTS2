@@ -12,6 +12,7 @@ import android.widget.LinearLayout
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.util.TypedValue
+import android.util.Log
 
 class StatusOverlay(private val context: Context) {
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -23,15 +24,14 @@ class StatusOverlay(private val context: Context) {
         createOverlayView()
     }
 
+    // === レイアウト構築 ===
     private fun createOverlayView() {
-        // LinearLayoutの作成
         overlayView = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundResource(android.R.drawable.dialog_holo_dark_frame)
             setPadding(24, 12, 24, 12)
         }
 
-        // TextViewの作成
         textView = TextView(context).apply {
             setTextColor(Color.WHITE)
             textSize = 14f
@@ -39,64 +39,60 @@ class StatusOverlay(private val context: Context) {
             gravity = Gravity.CENTER
             maxLines = 4
             ellipsize = TextUtils.TruncateAt.END
-
-            // テキストサイズを画面の大きさに応じて調整
             setAutoSizeTextTypeUniformWithConfiguration(
-                8, // 最小テキストサイズ
-                14, // 最大テキストサイズ
-                1, // サイズステップ
-                TypedValue.COMPLEX_UNIT_SP
+                8, 14, 1, TypedValue.COMPLEX_UNIT_SP
             )
         }
 
-        // TextViewをLinearLayoutに追加
-        overlayView?.addView(textView, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ))
+        overlayView?.addView(
+            textView, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
     }
 
+    // === 表示 ===
     fun show(message: String) {
-        if (!isShowing) {
-            // オーバーレイパラメータの設定
-            val params = WindowManager.LayoutParams().apply {
-                width = WindowManager.LayoutParams.WRAP_CONTENT
-                height = WindowManager.LayoutParams.WRAP_CONTENT
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                y = 1600  // 上端からの距離
-
-                // Android バージョンに応じたフラグの設定
-                flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-
-                // オーバーレイウィンドウのタイプ設定
-                type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                } else {
-                    @Suppress("DEPRECATION")
-                    WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
-                }
-
-                format = PixelFormat.TRANSLUCENT
-            }
-
-            try {
-                windowManager.addView(overlayView, params)
-                isShowing = true
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+        if (isShowing) {
+            updateMessage(message)
+            return
         }
 
-        // メッセージの更新
-        textView?.post {
+        val params = WindowManager.LayoutParams().apply {
+            width = WindowManager.LayoutParams.WRAP_CONTENT
+            height = WindowManager.LayoutParams.WRAP_CONTENT
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = 1600
+
+            flags = (WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                    or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
+
+            type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
+            }
+
+            format = PixelFormat.TRANSLUCENT
+        }
+
+        try {
+            windowManager.addView(overlayView, params)
             textView?.text = message
+            isShowing = true
+        } catch (e: SecurityException) {
+            Log.e("StatusOverlay", "Overlay permission missing: ${e.message}")
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
+    // === 非表示 ===
     fun hide() {
-        if (isShowing) {
+        if (isShowing && overlayView != null) {
             try {
                 windowManager.removeView(overlayView)
                 isShowing = false
@@ -106,9 +102,8 @@ class StatusOverlay(private val context: Context) {
         }
     }
 
+    // === メッセージ更新 ===
     fun updateMessage(message: String) {
-        textView?.post {
-            textView?.text = message
-        }
+        textView?.post { textView?.text = message }
     }
 }
