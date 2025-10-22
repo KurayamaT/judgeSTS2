@@ -17,6 +17,7 @@ import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -43,6 +44,9 @@ class IMUService : Service(), SensorEventListener {
     private var sessionStartTime: String? = null
     private var sessionStartTimeMillis: Long = 0L
     private var isRecording = false
+
+    // save files
+    private lateinit var storageFile: File
 
     // === GPS ===
     private lateinit var locationManager: LocationManager
@@ -79,8 +83,13 @@ class IMUService : Service(), SensorEventListener {
         val timestamp: Long,
         val ax: Float, val ay: Float, val az: Float,
         val gx: Float, val gy: Float, val gz: Float,
-        val qw: Float, val qx: Float, val qy: Float, val qz: Float
+        val qw: Float, val qx: Float, val qy: Float, val qz: Float,
+        val lat: Double = 0.0,  // GPS緯度
+        val lon: Double = 0.0,  // GPS経度
+        val alt: Double = 0.0,  // GPS高度
+        val acc: Double = 0.0   // GPS精度
     )
+
 
     // === GPS リスナー ===
     private val locationListener = object : LocationListener {
@@ -213,32 +222,60 @@ class IMUService : Service(), SensorEventListener {
         )
     }
 
+    // ===============================================
+// 記録ファイルの初期化と保存処理（ユーザーアクセス容易版）
+// ===============================================
+
+    @SuppressLint("SimpleDateFormat")
     private fun initializeStorageFile() {
-        val file = File(getExternalFilesDir(null), "${sessionStartTime}_imu.csv")
-        if (!file.exists()) {
-            file.createNewFile()
-            file.writeText("Timestamp(ms),ax,ay,az,gx,gy,gz,qw,qx,qy,qz,lat,lon,alt,acc\n")
+        // 1️⃣ ユーザーから見える "Documents/STS計測データ" フォルダを使用
+        val baseDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+        val folder = File(baseDir, "STS計測データ")
+
+        if (!folder.exists()) {
+            val created = folder.mkdirs()
+            Log.i("IMUService", "📁 フォルダ作成: ${folder.absolutePath} -> $created")
+        }
+
+        // 2️⃣ ファイルを作成（例：20251021_181315_imu.csv）
+        val fileName = "${sessionStartTime}_imu.csv"
+        val file = File(folder, fileName)
+
+        try {
+            if (!file.exists()) {
+                file.createNewFile()
+                file.writeText("Timestamp(ms),ax,ay,az,gx,gy,gz,qw,qx,qy,qz,lat,lon,alt,acc\n")
+            }
+            storageFile = file
+            Log.i("IMUService", "✅ 保存先: ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.e("IMUService", "❌ ファイル作成失敗: ${e.message}")
+            throw e
         }
     }
 
+
     private fun saveBufferToStorage() {
-        var list: List<IMUDataPoint>
-        bufferLock.withLock {
-            if (storageBuffer.isEmpty()) return
-            list = storageBuffer.toList(); storageBuffer.clear()
-        }
         try {
-            val file = File(getExternalFilesDir(null), "${sessionStartTime}_imu.csv")
-            val lines = list.joinToString("\n") {
-                "${it.timestamp},${it.ax},${it.ay},${it.az}," +
-                        "${it.gx},${it.gy},${it.gz},${it.qw},${it.qx},${it.qy},${it.qz}," +
-                        "$currentLat,$currentLon,$currentAlt,$currentAcc"
+            if (!::storageFile.isInitialized) return
+
+            val builder = StringBuilder()
+            while (dataBuffer.isNotEmpty()) {
+                val data = dataBuffer.poll()
+                builder.append("${data.timestamp},${data.ax},${data.ay},${data.az},")
+                builder.append("${data.gx},${data.gy},${data.gz},")
+                builder.append("${data.qw},${data.qx},${data.qy},${data.qz},")
+                builder.append("${data.lat},${data.lon},${data.alt},${data.acc}\n")
             }
-            file.appendText("$lines\n")
+
+            storageFile.appendText(builder.toString())
+
         } catch (e: Exception) {
-            Log.e("IMUService", "File write error", e)
+            e.printStackTrace()
         }
     }
+
+
 
     private fun saveBufferToFirebase() {
         var list: List<IMUDataPoint>
