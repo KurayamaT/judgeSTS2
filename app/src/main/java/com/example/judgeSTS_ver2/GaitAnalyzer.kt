@@ -330,3 +330,5 @@ class GaitAnalyzer(
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 }
+
+//ほほほ
