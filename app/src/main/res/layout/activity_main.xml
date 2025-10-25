@@ -8,7 +8,7 @@
     tools:context=".MainActivity">
 
     <!-- 追加: スマホの姿勢表示 -->
-    <com.example.judgests.OrientationView
+    <com.example.judgeSTS_ver2.OrientationView
         android:id="@+id/orientationView"
         android:layout_width="match_parent"
         android:layout_height="220dp"

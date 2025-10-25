@@ -1,4 +1,4 @@
-package com.example.judgests
+package com.example.judgeSTS_ver2
 
 import android.content.Context
 import android.graphics.PixelFormat

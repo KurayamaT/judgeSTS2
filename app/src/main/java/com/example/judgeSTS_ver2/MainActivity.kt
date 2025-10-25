@@ -1,4 +1,4 @@
-package com.example.judgests
+package com.example.judgeSTS_ver2
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -21,7 +21,6 @@ import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
 import com.github.mikephil.charting.utils.ColorTemplate
-import java.lang.Math.copySign
 import kotlin.math.*
 
 class MainActivity : AppCompatActivity() {

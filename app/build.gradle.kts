@@ -8,11 +8,11 @@ plugins {
 
 
 android {
-    namespace = "com.example.judgests"
+    namespace = "com.example.judgeSTS_ver2"  // 変更
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.example.judgests"
+        applicationId = "com.example.judgeSTS_ver2"  // 変更
         minSdk = 29
         targetSdk = 34
         versionCode = 1

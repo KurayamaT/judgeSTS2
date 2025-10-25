@@ -1,4 +1,4 @@
-package com.example.judgests
+package com.example.judgeSTS_ver2
 
 data class AccelerometerData(
     val timestamp: Long = 0,

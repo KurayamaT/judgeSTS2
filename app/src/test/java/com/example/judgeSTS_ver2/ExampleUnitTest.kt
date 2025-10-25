@@ -1,4 +1,4 @@
-package com.example.judgests
+package com.example.judgeSTS_ver2
 
 import org.junit.Test
 
