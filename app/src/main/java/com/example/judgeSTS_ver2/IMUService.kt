@@ -104,6 +104,34 @@ class IMUService : Service(), SensorEventListener {
         override fun onProviderDisabled(provider: String) {}
     }
 
+
+    // IMUService.kt への追記（フィールド）
+    private lateinit var gaitAnalyzer: GaitAnalyzer        // >>> ADD
+    private val analysisHandler = Handler(Looper.getMainLooper()) // >>> ADD
+    private val analysisTask = object : Runnable {         // >>> ADD
+        override fun run() {
+            try {
+                val res = gaitAnalyzer.compute()
+                // 既存オーバーレイに追記表示
+                val msg = """
+                ⏱ 計測中
+                🪑 起立: ${res.sitToStandCount} 回
+                🏃‍♂️ 歩数: ${res.stepCount} 歩
+            """.trimIndent()
+                statusOverlay.updateMessage(msg)
+                // 必要ならブロードキャスト（将来のUI表示用）
+                val intent = Intent("ANALYSIS_UPDATE").apply {
+                    putExtra("SIT2STAND", res.sitToStandCount)
+                    putExtra("STEPS", res.stepCount)
+                }
+                LocalBroadcastManager.getInstance(this@IMUService).sendBroadcast(intent)
+            } catch (_: Exception) {}
+            analysisHandler.postDelayed(this, 15000L) // 15秒ごと
+        }
+    }
+
+
+
     @SuppressLint("WakelockTimeout", "MissingPermission")
     override fun onCreate() {
         super.onCreate()
@@ -132,6 +160,8 @@ class IMUService : Service(), SensorEventListener {
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "IMUService::WakeLock").apply {
             setReferenceCounted(false)
         }
+        gaitAnalyzer = GaitAnalyzer(fs = 120) // >>> ADD
+
     }
 
     private fun setupSensors() {
@@ -163,6 +193,8 @@ class IMUService : Service(), SensorEventListener {
         wakeLock?.acquire()
         setupSensors()
         statusOverlay.show("📊 IMU+GPS計測開始")
+        analysisHandler.postDelayed(analysisTask, 15000L) // >>> ADD
+
     }
 
     private fun stopRecording() {
@@ -180,6 +212,9 @@ class IMUService : Service(), SensorEventListener {
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+
+        analysisHandler.removeCallbacksAndMessages(null)   // >>> ADD
+
     }
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -189,6 +224,7 @@ class IMUService : Service(), SensorEventListener {
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
                 currentAx = event.values[0]; currentAy = event.values[1]; currentAz = event.values[2]
+                gaitAnalyzer.append(now, currentAx, currentAy, currentAz)
             }
             Sensor.TYPE_GYROSCOPE -> {
                 currentGx = event.values[0]; currentGy = event.values[1]; currentGz = event.values[2]
@@ -223,8 +259,8 @@ class IMUService : Service(), SensorEventListener {
     }
 
     // ===============================================
-// 記録ファイルの初期化と保存処理（ユーザーアクセス容易版）
-// ===============================================
+    // 記録ファイルの初期化と保存処理（ユーザーアクセス容易版）
+    // ===============================================
 
     @SuppressLint("SimpleDateFormat")
     private fun initializeStorageFile() {
@@ -357,6 +393,7 @@ class IMUService : Service(), SensorEventListener {
         locationManager.removeUpdates(locationListener)
         wakeLock?.release()
         statusOverlay.hide()
+        analysisHandler.removeCallbacksAndMessages(null)   // >>> ADD
         super.onDestroy()
     }
 }
