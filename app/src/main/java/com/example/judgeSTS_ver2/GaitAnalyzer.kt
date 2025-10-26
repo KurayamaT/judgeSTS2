@@ -89,9 +89,10 @@ class GaitAnalyzer(
         val fltAy = filtfilt(bLP, aLP, absAy)
         val fltAz = filtfilt(bLP, aLP, absAz)
 
+        // ✅ 角度計算を修正：立位=90°、座位=0°（MATLAB定義に合わせる）
         val thighAngle = DoubleArray(n) {
             val denom = sqrt(fltAx[it]*fltAx[it] + fltAz[it]*fltAz[it]).coerceAtLeast(1e-9)
-            abs(Math.toDegrees(atan(fltAy[it]/denom)))
+            90.0 - abs(Math.toDegrees(atan(fltAy[it]/denom)))
         }
 
         // ---------- 起立／着座判定 ----------
@@ -214,17 +215,16 @@ class GaitAnalyzer(
                     keptGps.add(p)
                 }
             }
+        } else {
+            // GPS情報がない場合はそのまま使用
+            keptGps.addAll(kept)
         }
-        // （元コード）累積歩数更新
-// ✅ 累積歩数更新（正しい方へ）
-        totalStepCountInternal += keptGps.size
-        val stepCount = totalStepCount
 
-        // ✅累積更新（公開Getter用の内部カウンタ）
+        // ✅ 累積更新（公開Getter用の内部カウンタ）
         totalSitToStandCountInternal += sitToStandCount
         totalStepCountInternal += keptGps.size
 
-        return Result(sitToStandCount = sitToStandCount, stepCount = stepCount)
+        return Result(sitToStandCount = sitToStandCount, stepCount = keptGps.size)
     }
 
     // ===== utilities =====
@@ -354,5 +354,3 @@ class GaitAnalyzer(
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 }
-
-//ほほほふふふ

@@ -7,20 +7,27 @@
     android:orientation="vertical"
     tools:context=".MainActivity">
 
-    <!-- 追加: スマホの姿勢表示 -->
-    <com.example.judgeSTS_ver2.OrientationView
-        android:id="@+id/orientationView"
-        android:layout_width="match_parent"
-        android:layout_height="220dp"
-        android:layout_margin="8dp"/>
-
-    <!-- グラフ -->
-    <com.github.mikephil.charting.charts.LineChart
-        android:id="@+id/chartIMU"
+    <!-- グラフ表示エリア -->
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_margin="8dp"/>
+        android:layout_margin="8dp">
+
+        <!-- 加速度グラフ -->
+        <com.github.mikephil.charting.charts.LineChart
+            android:id="@+id/chartIMU"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="visible"/>
+
+        <!-- 角度表示View（初期は非表示） -->
+        <com.example.judgeSTS_ver2.ThighAngleView
+            android:id="@+id/thighAngleView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone"/>
+    </FrameLayout>
 
     <!-- === ボタン群 === -->
     <LinearLayout
@@ -30,31 +37,7 @@
         android:gravity="center_horizontal"
         android:padding="8dp">
 
-        <!-- 上段：Start / Stop -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:orientation="horizontal"
-            android:layout_marginBottom="8dp">
-
-            <Button
-                android:id="@+id/btnStart"
-                android:text="開始"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="8dp"/>
-
-            <Button
-                android:id="@+id/btnStop"
-                android:text="停止"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"/>
-        </LinearLayout>
-
-        <!-- 下段：切り替えボタン -->
+        <!-- 上段：Start / Stop / Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -62,24 +45,24 @@
             android:orientation="horizontal">
 
             <Button
-                android:id="@+id/btnAccel"
-                android:text="加速度"
+                android:id="@+id/btnStart"
+                android:text="開始"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginEnd="4dp"/>
 
             <Button
-                android:id="@+id/btnGyro"
-                android:text="角速度"
+                android:id="@+id/btnStop"
+                android:text="停止"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginEnd="4dp"/>
 
             <Button
-                android:id="@+id/btnOrient"
-                android:text="姿勢角"
+                android:id="@+id/btnToggleView"
+                android:text="角度"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"/>

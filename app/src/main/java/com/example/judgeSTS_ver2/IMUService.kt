@@ -31,19 +31,9 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
-import kotlin.time.Duration.Companion.milliseconds
 import android.os.HandlerThread
 
-
-
-
 class IMUService : Service(), SensorEventListener {
-
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        Log.e("IMUService", "🔥 onTaskRemoved: App was forced to stop!")
-        super.onTaskRemoved(rootIntent)
-    }
-
 
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
@@ -55,10 +45,8 @@ class IMUService : Service(), SensorEventListener {
     private var sessionStartTimeMillis: Long = 0L
     private var isRecording = false
 
-    // save files
     private lateinit var storageFile: File
 
-    // === GPS ===
     private lateinit var locationManager: LocationManager
     private var currentLat = 0.0
     private var currentLon = 0.0
@@ -69,7 +57,6 @@ class IMUService : Service(), SensorEventListener {
     private val storageBuffer = ArrayDeque<IMUDataPoint>(1000)
     private val bufferLock = ReentrantLock()
 
-    // 現在値保持
     private var currentAx = 0f; private var currentAy = 0f; private var currentAz = 0f
     private var currentGx = 0f; private var currentGy = 0f; private var currentGz = 0f
     private var currentQw = 1f; private var currentQx = 0f; private var currentQy = 0f; private var currentQz = 0f
@@ -85,7 +72,7 @@ class IMUService : Service(), SensorEventListener {
     companion object {
         private const val CHANNEL_ID = "IMUServiceChannel"
         private const val NOTIFICATION_ID = 1
-        private const val SENSOR_SAMPLING_PERIOD_US = 8334 // 約120Hz
+        private const val SENSOR_SAMPLING_PERIOD_US = 8334
         private const val MAX_REPORT_LATENCY_US = 50000
     }
 
@@ -100,7 +87,6 @@ class IMUService : Service(), SensorEventListener {
         val acc: Double = 0.0
     )
 
-    // === GPS リスナー ===
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             currentLat = location.latitude
@@ -113,7 +99,6 @@ class IMUService : Service(), SensorEventListener {
         override fun onProviderDisabled(provider: String) {}
     }
 
-    // === 解析（指定どおりBGスレッド化） ===
     private lateinit var gaitAnalyzer: GaitAnalyzer
     private lateinit var analysisThread: HandlerThread
     private lateinit var analysisHandler: Handler
@@ -121,13 +106,10 @@ class IMUService : Service(), SensorEventListener {
     private val analysisTask = object : Runnable {
         override fun run() {
             try {
-                // ✅ 最新30秒分で解析（内部の累積は維持）
                 gaitAnalyzer.compute()
 
-                // ✅ 表示は累積
                 val totalSitToStand = gaitAnalyzer.totalSitToStandCount
                 val totalSteps = gaitAnalyzer.totalStepCount
-                // ✅ 経過時間の表示追加
                 val elapsed = System.currentTimeMillis() - sessionStartTimeMillis
                 val sec = elapsed / 1000
                 val h = sec / 3600
@@ -139,10 +121,11 @@ class IMUService : Service(), SensorEventListener {
                     ⏱ ${String.format("%02d:%02d:%02d", h, m, s)}
                     🪑 起立: $totalSitToStand 回
                     🏃‍♂️ 歩行: $totalSteps 歩
+                    📍 Lat: ${"%.5f".format(currentLat)}
+                    📍 Lon: ${"%.5f".format(currentLon)}
                     """.trimIndent()
                 )
 
-                // ✅ 必要ならUIへ通知（累積を送る）
                 val intent = Intent("ANALYSIS_UPDATE").apply {
                     putExtra("SIT2STAND", totalSitToStand)
                     putExtra("STEPS", totalSteps)
@@ -152,7 +135,7 @@ class IMUService : Service(), SensorEventListener {
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-            analysisHandler.postDelayed(this, 15000L) // 15秒ごと
+            analysisHandler.postDelayed(this, 15000L)
         }
     }
 
@@ -167,30 +150,20 @@ class IMUService : Service(), SensorEventListener {
         gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         rotationVector = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
-        // === GPS初期化 ===
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         try {
-            // ✅ GPS測位（屋外向け）
             locationManager.requestLocationUpdates(
                 LocationManager.GPS_PROVIDER, 1000L, 0f, locationListener
-            )
-            // ✅ ネットワーク測位を追加（屋内でもLat/Lonが入る）
-            locationManager.requestLocationUpdates(
-                LocationManager.NETWORK_PROVIDER, 1000L, 0f, locationListener
             )
         } catch (e: SecurityException) {
             Log.e("IMUService", "GPS permission missing", e)
         }
 
-
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "IMUService::WakeLock").apply {
-            setReferenceCounted(false)
-        }
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "IMUService::WakeLock")
 
         gaitAnalyzer = GaitAnalyzer(fs = 120)
 
-        // ✅ BGスレッド起動
         analysisThread = HandlerThread("AnalysisThread", Thread.NORM_PRIORITY)
         analysisThread.start()
         analysisHandler = Handler(analysisThread.looper)
@@ -226,7 +199,6 @@ class IMUService : Service(), SensorEventListener {
         setupSensors()
         statusOverlay.show("📊 IMU+GPS計測開始")
 
-        // ✅ 15秒ごと解析開始（BG）
         analysisHandler.postDelayed(analysisTask, 15000L)
     }
 
@@ -238,14 +210,12 @@ class IMUService : Service(), SensorEventListener {
         sensorManager.unregisterListener(this)
         locationManager.removeUpdates(locationListener)
         wakeLock?.release()
-
         statusOverlay.updateMessage("📊 IMU+GPS計測停止")
         mainHandler.postDelayed({ statusOverlay.hide() }, 2000)
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
 
-        // ✅ 解析タスク停止
         analysisHandler.removeCallbacksAndMessages(null)
     }
 
@@ -256,7 +226,6 @@ class IMUService : Service(), SensorEventListener {
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
                 currentAx = event.values[0]; currentAy = event.values[1]; currentAz = event.values[2]
-                // ✅ 30秒循環バッファへ投入
                 gaitAnalyzer.append(now, currentAx, currentAy, currentAz)
             }
             Sensor.TYPE_GYROSCOPE -> {
@@ -268,6 +237,14 @@ class IMUService : Service(), SensorEventListener {
                 currentQw = quat[0]; currentQx = quat[1]; currentQy = quat[2]; currentQz = quat[3]
             }
         }
+
+        // MainActivityのグラフ用に加速度データをBroadcast送信
+        val intent = Intent("IMU_DATA").apply {
+            putExtra("AX", currentAx)
+            putExtra("AY", currentAy)
+            putExtra("AZ", currentAz)
+        }
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
 
         val data = IMUDataPoint(
             now, currentAx, currentAy, currentAz,
@@ -287,61 +264,36 @@ class IMUService : Service(), SensorEventListener {
             saveBufferToFirebase()
             lastFirebaseWriteTime = now
         }
-
-        sendIMUData(
-            currentAx, currentAy, currentAz,
-            currentGx, currentGy, currentGz,
-            currentQw, currentQx, currentQy, currentQz
-        )
     }
 
-    // ===============================================
-    // 記録ファイルの初期化と保存処理（ユーザーアクセス容易版）
-    // ===============================================
     @SuppressLint("SimpleDateFormat")
     private fun initializeStorageFile() {
         val baseDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
         val folder = File(baseDir, "STS計測データ")
 
         if (!folder.exists()) {
-            val created = folder.mkdirs()
-            Log.i("IMUService", "📁 フォルダ作成: ${folder.absolutePath} -> $created")
+            folder.mkdirs()
         }
 
         val fileName = "${sessionStartTime}_imu.csv"
-        val file = File(folder, fileName)
-
-        try {
-            if (!file.exists()) {
-                file.createNewFile()
-                file.writeText("Timestamp(ms),ax,ay,az,gx,gy,gz,qw,qx,qy,qz,lat,lon,alt,acc\n")
-            }
-            storageFile = file
-            Log.i("IMUService", "✅ 保存先: ${file.absolutePath}")
-        } catch (e: Exception) {
-            Log.e("IMUService", "❌ ファイル作成失敗: ${e.message}")
-            throw e
+        storageFile = File(folder, fileName)
+        if (!storageFile.exists()) {
+            storageFile.createNewFile()
+            storageFile.writeText("Timestamp(ms),ax,ay,az,gx,gy,gz,qw,qx,qy,qz,lat,lon,alt,acc\n")
         }
     }
 
     private fun saveBufferToStorage() {
-        try {
-            if (!::storageFile.isInitialized) return
+        if (!::storageFile.isInitialized) return
 
-            val builder = StringBuilder()
-            while (dataBuffer.isNotEmpty()) {
-                val data = dataBuffer.poll()
-                builder.append("${data.timestamp},${data.ax},${data.ay},${data.az},")
-                builder.append("${data.gx},${data.gy},${data.gz},")
-                builder.append("${data.qw},${data.qx},${data.qy},${data.qz},")
-                builder.append("${data.lat},${data.lon},${data.alt},${data.acc}\n")
-            }
-
-            storageFile.appendText(builder.toString())
-
-        } catch (e: Exception) {
-            e.printStackTrace()
+        val builder = StringBuilder()
+        while (dataBuffer.isNotEmpty()) {
+            val data = dataBuffer.poll()
+            builder.append("${data.timestamp},${data.ax},${data.ay},${data.az},")
+            builder.append("${data.gx},${data.gy},${data.gz},${data.qw},${data.qx},${data.qy},${data.qz},")
+            builder.append("${currentLat},${currentLon},${currentAlt},${currentAcc}\n")
         }
+        storageFile.appendText(builder.toString())
     }
 
     private fun saveBufferToFirebase() {
@@ -362,32 +314,10 @@ class IMUService : Service(), SensorEventListener {
             .child(sessionStartTime!!)
             .child(currentTime.toString())
 
-        ref.setValue(batchData).addOnSuccessListener {
-            val elapsed = (currentTime - sessionStartTimeMillis).milliseconds
-            val msg = """
-                ⏱ ${String.format("%02d:%02d:%02d", elapsed.inWholeHours, elapsed.inWholeMinutes % 60, elapsed.inWholeSeconds % 60)} 計測中
-                📍 Lat:${"%.5f".format(currentLat)} Lon:${"%.5f".format(currentLon)}
-            """.trimIndent()
-            statusOverlay.updateMessage(msg)
-        }.addOnFailureListener {
-            statusOverlay.updateMessage("❌ 送信エラー")
-        }
-    }
-
-    private fun sendIMUData(
-        ax: Float, ay: Float, az: Float,
-        gx: Float, gy: Float, gz: Float,
-        qw: Float = 1f, qx: Float = 0f, qy: Float = 0f, qz: Float = 0f
-    ) {
-        val intent = Intent("IMU_DATA").apply {
-            putExtra("AX", ax); putExtra("AY", ay); putExtra("AZ", az)
-            putExtra("GX", gx); putExtra("GY", gy); putExtra("GZ", gz)
-            putExtra("QW", qw); putExtra("QX", qx); putExtra("QY", qy); putExtra("QZ", qz)
-            putExtra("LAT", currentLat.toFloat())
-            putExtra("LON", currentLon.toFloat())
-            putExtra("ALT", currentAlt.toFloat())
-        }
-        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+        ref.setValue(batchData)
+            .addOnFailureListener {
+                Log.e("IMUService", "Firebase send failed: ${it.message}")
+            }
     }
 
     private fun createNotification(): Notification {
@@ -413,26 +343,22 @@ class IMUService : Service(), SensorEventListener {
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         if (isRecording) {
-            saveBufferToStorage(); saveBufferToFirebase()
+            saveBufferToStorage()
+            saveBufferToFirebase()
         }
         sensorManager.unregisterListener(this)
         locationManager.removeUpdates(locationListener)
         wakeLock?.release()
         statusOverlay.hide()
 
-        // ✅ 解析タスク停止 + スレッド終了
         analysisHandler.removeCallbacksAndMessages(null)
         if (this::analysisThread.isInitialized) {
             analysisThread.quitSafely()
         }
-
         super.onDestroy()
-        Log.e("IMUService", "🔥 onDestroy() called")
-
     }
 }
