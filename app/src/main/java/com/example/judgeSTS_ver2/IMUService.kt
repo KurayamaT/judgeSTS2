@@ -34,7 +34,16 @@ import kotlin.concurrent.withLock
 import kotlin.time.Duration.Companion.milliseconds
 import android.os.HandlerThread
 
+
+
+
 class IMUService : Service(), SensorEventListener {
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.e("IMUService", "🔥 onTaskRemoved: App was forced to stop!")
+        super.onTaskRemoved(rootIntent)
+    }
+
 
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
@@ -423,5 +432,7 @@ class IMUService : Service(), SensorEventListener {
         }
 
         super.onDestroy()
+        Log.e("IMUService", "🔥 onDestroy() called")
+
     }
 }
