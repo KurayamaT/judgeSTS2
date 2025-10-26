@@ -69,6 +69,8 @@ class IMUService : Service(), SensorEventListener {
     private lateinit var statusOverlay: StatusOverlay
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private var lastSentIndex = 0   // ★追加：逐次送信用インデックス追跡
+
     companion object {
         private const val CHANNEL_ID = "IMUServiceChannel"
         private const val NOTIFICATION_ID = 1
@@ -238,7 +240,6 @@ class IMUService : Service(), SensorEventListener {
             }
         }
 
-        // MainActivityのグラフ用に加速度データをBroadcast送信
         val intent = Intent("IMU_DATA").apply {
             putExtra("AX", currentAx)
             putExtra("AY", currentAy)
@@ -296,15 +297,33 @@ class IMUService : Service(), SensorEventListener {
         storageFile.appendText(builder.toString())
     }
 
+    // =======================================================
+    // Firebase逐次送信（OOM防止・3.3秒/400サンプル単位）
+    // =======================================================
     private fun saveBufferToFirebase() {
+        Log.d("IMUService", "saveBufferToFirebase() called")
+
+        val chunkSize = 400
         var list: List<IMUDataPoint>
+
         bufferLock.withLock {
-            if (dataBuffer.isEmpty()) return
-            list = dataBuffer.toList(); dataBuffer.clear()
+            if (storageBuffer.isEmpty()) {
+                Log.w("IMUService", "storageBuffer empty -> skip")
+                return
+            }
+
+            if (lastSentIndex >= storageBuffer.size) {
+                Log.d("IMUService", "No new data to send")
+                return
+            }
+
+            val endIndex = minOf(storageBuffer.size, lastSentIndex + chunkSize)
+            list = storageBuffer.toList().subList(lastSentIndex, endIndex)
+            lastSentIndex = endIndex
         }
 
-        val currentTime = System.currentTimeMillis()
-        val batchData = list.joinToString("\n") {
+        val timeKey = System.currentTimeMillis().toString()
+        val csvChunk = list.joinToString("\n") {
             "${it.timestamp},${it.ax},${it.ay},${it.az}," +
                     "${it.gx},${it.gy},${it.gz},${it.qw},${it.qx},${it.qy},${it.qz}," +
                     "$currentLat,$currentLon,$currentAlt,$currentAcc"
@@ -312,9 +331,12 @@ class IMUService : Service(), SensorEventListener {
 
         val ref = database.getReference("SmartPhone_data_IMU_GPS")
             .child(sessionStartTime!!)
-            .child(currentTime.toString())
+            .child(timeKey)
 
-        ref.setValue(batchData)
+        ref.setValue(csvChunk)
+            .addOnSuccessListener {
+                Log.d("IMUService", "Firebase send OK: ${list.size} pts (up to $lastSentIndex)")
+            }
             .addOnFailureListener {
                 Log.e("IMUService", "Firebase send failed: ${it.message}")
             }
