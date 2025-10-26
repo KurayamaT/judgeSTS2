@@ -69,8 +69,6 @@ class IMUService : Service(), SensorEventListener {
     private lateinit var statusOverlay: StatusOverlay
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private var lastSentIndex = 0   // ★追加：逐次送信用インデックス追跡
-
     companion object {
         private const val CHANNEL_ID = "IMUServiceChannel"
         private const val NOTIFICATION_ID = 1
@@ -298,7 +296,7 @@ class IMUService : Service(), SensorEventListener {
     }
 
     // =======================================================
-    // Firebase逐次送信（OOM防止・3.3秒/400サンプル単位）
+    // Firebase逐次送信（OOM防止・送信済みデータ削除版）
     // =======================================================
     private fun saveBufferToFirebase() {
         Log.d("IMUService", "saveBufferToFirebase() called")
@@ -312,14 +310,9 @@ class IMUService : Service(), SensorEventListener {
                 return
             }
 
-            if (lastSentIndex >= storageBuffer.size) {
-                Log.d("IMUService", "No new data to send")
-                return
-            }
-
-            val endIndex = minOf(storageBuffer.size, lastSentIndex + chunkSize)
-            list = storageBuffer.toList().subList(lastSentIndex, endIndex)
-            lastSentIndex = endIndex
+            // 先頭から最大400個取得
+            val actualChunkSize = minOf(chunkSize, storageBuffer.size)
+            list = storageBuffer.take(actualChunkSize)
         }
 
         val timeKey = System.currentTimeMillis().toString()
@@ -335,10 +328,19 @@ class IMUService : Service(), SensorEventListener {
 
         ref.setValue(csvChunk)
             .addOnSuccessListener {
-                Log.d("IMUService", "Firebase send OK: ${list.size} pts (up to $lastSentIndex)")
+                // 送信成功したら先頭から削除してメモリ解放
+                bufferLock.withLock {
+                    repeat(list.size) {
+                        if (storageBuffer.isNotEmpty()) {
+                            storageBuffer.removeFirst()
+                        }
+                    }
+                }
+                Log.d("IMUService", "Firebase send OK: ${list.size} pts (buffer size: ${storageBuffer.size})")
             }
             .addOnFailureListener {
                 Log.e("IMUService", "Firebase send failed: ${it.message}")
+                // 失敗時は削除しないので次回リトライされる
             }
     }
 
