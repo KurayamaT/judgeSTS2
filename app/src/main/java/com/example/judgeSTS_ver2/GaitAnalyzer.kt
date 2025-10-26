@@ -19,6 +19,10 @@ class GaitAnalyzer(
     private val ay = ArrayList<Float>()
     private val az = ArrayList<Float>()
 
+    // ✅ 累積起立回数（累積歩数も）
+    private var totalSitToStandCountInternal = 0
+    private var totalStepCountInternal = 0
+
     // ---- GPS位置バッファ（IMUServiceからセット） ----
     private var gpsLat: List<Double> = listOf()
     private var gpsLon: List<Double> = listOf()
@@ -28,20 +32,34 @@ class GaitAnalyzer(
         gpsLon = lon
     }
 
+    // 解析バッファ上限（30秒分）
+    private val maxSamples = fs * 30
+
     fun append(tMillis: Long, ax_: Float, ay_: Float, az_: Float) {
+        // ▼追加：循環化（上限を超えたら先頭を捨てる）
+        if (ts.size >= maxSamples) {
+            ts.removeAt(0)
+            ax.removeAt(0)
+            ay.removeAt(0)
+            az.removeAt(0)
+        }
         ts.add(tMillis)
         ax.add(ax_)
         ay.add(ay_)
         az.add(az_)
     }
 
+    // ✅ 累積値 Getter（IMUService用）
+    val totalSitToStandCount: Int
+        get() = totalSitToStandCountInternal
+
+    val totalStepCount: Int
+        get() = totalStepCountInternal
+
     data class Result(
         val sitToStandCount: Int,
         val stepCount: Int
     )
-
-    // ---- 累積カウンタ ----
-    private var totalStepCount: Int = 0
 
     // ---- バターワース係数（MATLAB 相当） ----
     private val bLP = doubleArrayOf(
@@ -133,10 +151,11 @@ class GaitAnalyzer(
         val yBP = filtfilt(bBP, aBP, yInterp)
         val yAbs = DoubleArray(n) { abs(yBP[it]) }
 
-        val minHeight = 11.8
-        val minProm = 6.0
-        val minW = (0.30 * fs).toInt()
-        val minDist = (fs/2).toInt().coerceAtLeast(1)
+        val minHeight = 1.2
+        val minProm = 0.0                      // prominence条件は無効化
+        val minW = (0.12 * fs).toInt()         // 参考値（MATLABは幅指定なし）
+        val minDist = (fs / 2.5).toInt()       // ≈0.4s → 最大~150spm
+
 
         val peaks = ArrayList<Int>()
         for ((s,e) in allowedIntervals) {
@@ -178,7 +197,7 @@ class GaitAnalyzer(
         // ---------- 除外3：GPS移動量チェック ----------
         val keptGps = ArrayList<Int>()
         val timeWindow = 10.0
-        val minMoveDist = 3.0  // あなた指定値：3m／10秒
+        val minMoveDist = 2.0  // あなた指定値：3m／10秒
         if (gpsLat.size == n && gpsLon.size == n) {
             for (p in kept) {
                 val tCur = ts[p]
@@ -196,9 +215,14 @@ class GaitAnalyzer(
                 }
             }
         }
-        // 累積歩数更新
-        totalStepCount += keptGps.size
+        // （元コード）累積歩数更新
+// ✅ 累積歩数更新（正しい方へ）
+        totalStepCountInternal += keptGps.size
         val stepCount = totalStepCount
+
+        // ✅累積更新（公開Getter用の内部カウンタ）
+        totalSitToStandCountInternal += sitToStandCount
+        totalStepCountInternal += keptGps.size
 
         return Result(sitToStandCount = sitToStandCount, stepCount = stepCount)
     }

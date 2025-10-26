@@ -34,15 +34,17 @@ class StatusOverlay(private val context: Context) {
 
         textView = TextView(context).apply {
             setTextColor(Color.WHITE)
-            textSize = 14f
+            textSize = 18f
             typeface = Typeface.MONOSPACE
             gravity = Gravity.CENTER
-            maxLines = 4
-            ellipsize = TextUtils.TruncateAt.END
-            setAutoSizeTextTypeUniformWithConfiguration(
-                8, 14, 1, TypedValue.COMPLEX_UNIT_SP
-            )
+
+            maxLines = 10   // ✅ 行数上限を増やす（4→10）
+            ellipsize = null // ✅ 途中省略禁止
+
+            setPadding(24, 32, 24, 32) // ✅ 余白追加
+            setLineSpacing(12f, 1.3f)  // ✅ 行間広げる
         }
+
 
         overlayView?.addView(
             textView, LinearLayout.LayoutParams(
@@ -63,7 +65,7 @@ class StatusOverlay(private val context: Context) {
             width = WindowManager.LayoutParams.WRAP_CONTENT
             height = WindowManager.LayoutParams.WRAP_CONTENT
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = 1600
+            y = 220
 
             flags = (WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                     or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
