@@ -13,15 +13,18 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.StatFs
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.firebase.database.FirebaseDatabase
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.time.Duration.Companion.milliseconds
@@ -37,10 +40,9 @@ class AccelerometerService : Service(), SensorEventListener {
     private lateinit var database: FirebaseDatabase
     private var wakeLock: PowerManager.WakeLock? = null
     private var sessionStartTime: String? = null
-    private var sessionStartTimeMillis: Long = 0L  // セッション開始時のシステム時間
+    private var sessionStartTimeMillis: Long = 0L
     private var recordingStartTime: Long = 0L
 
-    // 現在の加速度値を保持するプロパティ
     private var currentX: Float = 0f
     private var currentY: Float = 0f
     private var currentZ: Float = 0f
@@ -48,7 +50,13 @@ class AccelerometerService : Service(), SensorEventListener {
     private var isRecording = false
     private var cumulativeDataSize = 0L
 
-    // データポイントを表現するデータクラス
+    // ファイルローテーション用
+    private lateinit var storageFile: File
+    private var currentFileSize = 0L
+    private var fileIndex = 0
+    private val MAX_FILE_SIZE = 100 * 1024 * 1024L  // 100MB
+    private val MIN_FREE_SPACE = 500 * 1024 * 1024L  // 500MB
+
     private data class AccelerometerDataPoint(
         val timestamp: Long,
         val x: Float,
@@ -56,21 +64,15 @@ class AccelerometerService : Service(), SensorEventListener {
         val z: Float
     )
 
-    // バッファリング用のデータ構造
     private val dataBuffer = ArrayDeque<AccelerometerDataPoint>(1000)
     private val storageBuffer = ArrayDeque<AccelerometerDataPoint>(1000)
     private val bufferLock = ReentrantLock()
 
-    // 時間間隔の定数
     private val STORAGE_WRITE_INTERVAL = 5000L
     private val FIREBASE_WRITE_INTERVAL = 5000L
 
-    // タイムスタンプ管理
     private var lastWriteTime = 0L
     private var lastStorageWriteTime = 0L
-    private var lastSensorTimestamp: Long = 0
-    private var initNanoTime: Long = 0
-    private var initSystemTime: Long = 0
 
     private lateinit var statusOverlay: StatusOverlay
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -81,6 +83,7 @@ class AccelerometerService : Service(), SensorEventListener {
         private const val WAKELOCK_TAG = "AccelerometerService::WakeLock"
         private const val SENSOR_SAMPLING_PERIOD_US = 8334
         private const val MAX_REPORT_LATENCY_US = 50000
+        private const val TAG = "AccelerometerService"
     }
 
     private var lastSampleTime = 0L
@@ -96,7 +99,6 @@ class AccelerometerService : Service(), SensorEventListener {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-        // WakeLockの初期化
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
@@ -132,92 +134,81 @@ class AccelerometerService : Service(), SensorEventListener {
     }
 
     private fun startRecording() {
-        if (!isRecording) {
-            isRecording = true
+        if (isRecording) return
 
-            // セッション開始時の正確な時間を記録（JSTで取得）
-            val calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Tokyo"))
-            sessionStartTimeMillis = calendar.timeInMillis
-            sessionStartTime = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault()).apply {
-                timeZone = TimeZone.getTimeZone("Asia/Tokyo")
-            }.format(calendar.time)
-
-            // 初期化
-            initNanoTime = System.nanoTime()
-            initSystemTime = sessionStartTimeMillis
-            lastSensorTimestamp = 0
-            recordingStartTime = sessionStartTimeMillis
-            lastWriteTime = sessionStartTimeMillis
-            lastStorageWriteTime = sessionStartTimeMillis
-            cumulativeDataSize = 0L
-
-            // ファイルのヘッダーを作成
-            initializeStorageFile()
-
-            // フォアグラウンドサービス開始
-            val notification = createNotification()
-            startForeground(NOTIFICATION_ID, notification)
-
-            // WakeLock取得
-            wakeLock?.apply {
-                if (!isHeld) {
-                    acquire()
-                }
-            }
-
-            // センサー登録
-            setupSensor()
-
-            // 初期メッセージを表示
-            statusOverlay.show("📊 ACC計測開始")
+        // ストレージ容量チェック
+        if (getFreeStorageSpace() < MIN_FREE_SPACE) {
+            Log.e(TAG, "Insufficient storage space")
+            statusOverlay.show("❌ ストレージ容量不足（500MB以上必要）")
+            mainHandler.postDelayed({ statusOverlay.hide() }, 3000)
+            return
         }
+
+        isRecording = true
+
+        val calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Tokyo"))
+        sessionStartTimeMillis = calendar.timeInMillis
+        sessionStartTime = SimpleDateFormat("yyyyMMddHHmmss", Locale.getDefault()).apply {
+            timeZone = TimeZone.getTimeZone("Asia/Tokyo")
+        }.format(calendar.time)
+
+        recordingStartTime = sessionStartTimeMillis
+        lastWriteTime = sessionStartTimeMillis
+        lastStorageWriteTime = sessionStartTimeMillis
+        cumulativeDataSize = 0L
+        fileIndex = 0
+
+        initializeStorageFile()
+
+        val notification = createNotification()
+        startForeground(NOTIFICATION_ID, notification)
+
+        wakeLock?.apply {
+            if (!isHeld) {
+                acquire()
+            }
+        }
+
+        setupSensor()
+        statusOverlay.show("📊 ACC計測開始")
     }
 
     private fun stopRecording() {
-        if (isRecording) {
-            isRecording = false
+        if (!isRecording) return
+        isRecording = false
 
-            // 残りのデータを保存
-            saveBufferToStorage()
-            saveBufferToFirebase()
+        saveBufferToStorage()
+        saveBufferToFirebase()
 
-            // センサー登録解除
-            sensorManager.unregisterListener(this)
+        sensorManager.unregisterListener(this)
 
-            // WakeLock解放
-            wakeLock?.apply {
-                if (isHeld) {
-                    release()
-                }
+        wakeLock?.apply {
+            if (isHeld) {
+                release()
             }
-
-            // 停止メッセージを表示
-            statusOverlay.updateMessage("📊 ACC計測停止")
-
-            // 2秒後にオーバーレイを非表示
-            mainHandler.postDelayed({
-                statusOverlay.hide()
-            }, 2000)
-
-            // フォアグラウンドサービス停止
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                stopForeground(STOP_FOREGROUND_DETACH)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
-
-            stopSelf()
         }
+
+        statusOverlay.updateMessage("📊 ACC計測停止")
+        mainHandler.postDelayed({
+            statusOverlay.hide()
+        }, 2000)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            stopForeground(STOP_FOREGROUND_DETACH)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+
+        stopSelf()
     }
 
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type == Sensor.TYPE_ACCELEROMETER && isRecording) {
-            // システム時刻を直接使用
             val currentTime = System.currentTimeMillis()
 
             val dataPoint = AccelerometerDataPoint(
-                timestamp = currentTime,  // この時刻が各データポイントのタイムスタンプになる
+                timestamp = currentTime,
                 x = event.values[0],
                 y = event.values[1],
                 z = event.values[2]
@@ -228,12 +219,12 @@ class AccelerometerService : Service(), SensorEventListener {
                 storageBuffer.addLast(dataPoint)
             }
 
-            // 現在値の更新
             currentX = event.values[0]
             currentY = event.values[1]
             currentZ = event.values[2]
 
-            // 書き込みチェック
+            sampleCount++
+
             if (currentTime - lastStorageWriteTime >= STORAGE_WRITE_INTERVAL) {
                 saveBufferToStorage()
                 lastStorageWriteTime = currentTime
@@ -250,13 +241,22 @@ class AccelerometerService : Service(), SensorEventListener {
 
     private fun initializeStorageFile() {
         try {
-            val file = File(getExternalFilesDir(null), "${sessionStartTime}_accelerometer.csv")
-            if (!file.exists()) {
-                file.createNewFile()
-                file.writeText("Timestamp(ms),X,Y,Z\n")
+            val baseDir = getExternalFilesDir(null)
+            val fileName = "${sessionStartTime}_accelerometer_part${fileIndex}.csv"
+            storageFile = File(baseDir, fileName)
+            currentFileSize = 0L
+
+            if (!storageFile.exists()) {
+                storageFile.createNewFile()
+                val header = "Timestamp(ms),X,Y,Z\n"
+                storageFile.writeText(header)
+                currentFileSize = header.length.toLong()
             }
+
+            Log.d(TAG, "Initialized storage file: ${storageFile.absolutePath}")
         } catch (e: Exception) {
-            Log.e("Storage", "Error initializing file", e)
+            Log.e(TAG, "Error initializing file", e)
+            statusOverlay.updateMessage("❌ ファイル初期化エラー")
         }
     }
 
@@ -270,15 +270,40 @@ class AccelerometerService : Service(), SensorEventListener {
         }
 
         try {
-            val file = File(getExternalFilesDir(null), "${sessionStartTime}_accelerometer.csv")
+            // ストレージ容量チェック
+            if (getFreeStorageSpace() < MIN_FREE_SPACE) {
+                Log.e(TAG, "Low storage space, stopping recording")
+                statusOverlay.updateMessage("❌ ストレージ容量不足")
+                stopRecording()
+                return
+            }
+
             val csvLines = dataToWrite.joinToString("\n") { data ->
                 "${data.timestamp},${data.x},${data.y},${data.z}"
             }
-            file.appendText("$csvLines\n")
+            val csvData = "$csvLines\n"
+            val dataSize = csvData.length.toLong()
 
-            cumulativeDataSize += csvLines.length
+            // ファイルサイズチェック（100MBでローテーション）
+            if (currentFileSize + dataSize > MAX_FILE_SIZE) {
+                Log.d(TAG, "File size limit reached, rotating to new file")
+                fileIndex++
+                initializeStorageFile()
+            }
+
+            // 効率的な書き込み
+            FileOutputStream(storageFile, true).use { fos ->
+                fos.write(csvData.toByteArray())
+            }
+
+            currentFileSize += dataSize
+            cumulativeDataSize += dataSize
+
+            Log.d(TAG, "Wrote ${dataToWrite.size} samples, file size: ${currentFileSize / 1024}KB")
+
         } catch (e: Exception) {
-            Log.e("Storage", "Error writing to file", e)
+            Log.e(TAG, "Error writing to file", e)
+            statusOverlay.updateMessage("❌ ファイル書き込みエラー")
         }
     }
 
@@ -292,17 +317,14 @@ class AccelerometerService : Service(), SensorEventListener {
             dataBuffer.clear()
         }
 
-        // currentTimeをシステム時刻から取得するのではなく
-        // sessionStartTimeからの経過時間として計算
         val currentTime = System.currentTimeMillis()
 
-        // データポイントのタイムスタンプをそのまま使用
         val batchData = dataToSend.joinToString("\n") { data ->
             "${data.timestamp},${data.x},${data.y},${data.z}"
         }
 
         val reference = database.getReference("SmartPhone_data")
-            .child(sessionStartTime!!)  // これは正しい（20241226150541）
+            .child(sessionStartTime!!)
             .child(currentTime.toString())
 
         actualSamplingRate = (sampleCount / 5.0)
@@ -313,20 +335,34 @@ class AccelerometerService : Service(), SensorEventListener {
                 val elapsedTime = currentTime - recordingStartTime
                 val formattedElapsedTime = formatElapsedTime(elapsedTime)
                 val dataSizeMB = String.format("%.2f", cumulativeDataSize / (1024.0 * 1024.0))
+                val freeSpace = getFreeStorageSpace() / (1024 * 1024)
+
                 val message = """
                 📊 ACC計測中
                 ⏱ 経過時間: $formattedElapsedTime
                 💾 累計データ: ${dataSizeMB}MB
                 📊 sampling: ${String.format("%.1f", actualSamplingRate)}Hz
+                💾 空き: ${freeSpace}MB
+                📄 File#${fileIndex}
                 """.trimIndent()
 
                 statusOverlay.updateMessage(message)
-                Log.d("Firebase", "Saved ${dataToSend.size} samples at: $currentTime")
+                Log.d(TAG, "Saved ${dataToSend.size} samples")
             }
             .addOnFailureListener { e ->
-                Log.e("Firebase", "Error saving data", e)
-                statusOverlay.updateMessage("❌ データ送信エラー")
+                Log.e(TAG, "Error saving data", e)
             }
+    }
+
+    private fun getFreeStorageSpace(): Long {
+        return try {
+            val path = getExternalFilesDir(null)?.path ?: return 0L
+            val stat = StatFs(path)
+            stat.availableBlocksLong * stat.blockSizeLong
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting storage space", e)
+            0L
+        }
     }
 
     private fun formatElapsedTime(elapsedMillis: Long): String {
@@ -388,9 +424,7 @@ class AccelerometerService : Service(), SensorEventListener {
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-        // 精度変更時の処理が必要な場合はここに実装
-    }
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -408,10 +442,7 @@ class AccelerometerService : Service(), SensorEventListener {
             }
         }
 
-        // メインハンドラーの後続処理をキャンセル
         mainHandler.removeCallbacksAndMessages(null)
-
-        // オーバーレイを非表示
         statusOverlay.hide()
     }
 }

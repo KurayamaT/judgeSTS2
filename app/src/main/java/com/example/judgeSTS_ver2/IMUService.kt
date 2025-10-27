@@ -22,11 +22,13 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.StatFs
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.firebase.database.FirebaseDatabase
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.locks.ReentrantLock
@@ -46,6 +48,10 @@ class IMUService : Service(), SensorEventListener {
     private var isRecording = false
 
     private lateinit var storageFile: File
+    private var currentFileSize = 0L
+    private var fileIndex = 0
+    private val MAX_FILE_SIZE = 100 * 1024 * 1024L  // 100MB
+    private val MIN_FREE_SPACE = 500 * 1024 * 1024L  // 500MB
 
     private lateinit var locationManager: LocationManager
     private var currentLat = 0.0
@@ -62,7 +68,7 @@ class IMUService : Service(), SensorEventListener {
     private var currentQw = 1f; private var currentQx = 0f; private var currentQy = 0f; private var currentQz = 0f
 
     private val STORAGE_WRITE_INTERVAL = 5000L
-    private val FIREBASE_WRITE_INTERVAL = 5000L
+    private val FIREBASE_WRITE_INTERVAL = 5000L  // 3秒→5秒（低速回線対応）
     private var lastStorageWriteTime = 0L
     private var lastFirebaseWriteTime = 0L
 
@@ -74,6 +80,7 @@ class IMUService : Service(), SensorEventListener {
         private const val NOTIFICATION_ID = 1
         private const val SENSOR_SAMPLING_PERIOD_US = 8334
         private const val MAX_REPORT_LATENCY_US = 50000
+        private const val TAG = "IMUService"
     }
 
     data class IMUDataPoint(
@@ -116,6 +123,10 @@ class IMUService : Service(), SensorEventListener {
                 val m = (sec % 3600) / 60
                 val s = sec % 60
 
+                // ストレージ容量チェック
+                val freeSpace = getFreeStorageSpace()
+                val freeSpaceMB = freeSpace / (1024 * 1024)
+
                 statusOverlay.updateMessage(
                     """
                     ⏱ ${String.format("%02d:%02d:%02d", h, m, s)}
@@ -123,6 +134,8 @@ class IMUService : Service(), SensorEventListener {
                     🏃‍♂️ 歩行: $totalSteps 歩
                     📍 Lat: ${"%.5f".format(currentLat)}
                     📍 Lon: ${"%.5f".format(currentLon)}
+                    💾 空き: ${freeSpaceMB}MB
+                    📄 File#${fileIndex}
                     """.trimIndent()
                 )
 
@@ -133,7 +146,7 @@ class IMUService : Service(), SensorEventListener {
                 LocalBroadcastManager.getInstance(this@IMUService).sendBroadcast(intent)
 
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "Analysis error", e)
             }
             analysisHandler.postDelayed(this, 15000L)
         }
@@ -156,7 +169,7 @@ class IMUService : Service(), SensorEventListener {
                 LocationManager.GPS_PROVIDER, 1000L, 0f, locationListener
             )
         } catch (e: SecurityException) {
-            Log.e("IMUService", "GPS permission missing", e)
+            Log.e(TAG, "GPS permission missing", e)
         }
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -185,6 +198,15 @@ class IMUService : Service(), SensorEventListener {
 
     private fun startRecording() {
         if (isRecording) return
+
+        // ストレージ容量チェック
+        if (getFreeStorageSpace() < MIN_FREE_SPACE) {
+            Log.e(TAG, "Insufficient storage space")
+            statusOverlay.show("❌ ストレージ容量不足（500MB以上必要）")
+            mainHandler.postDelayed({ statusOverlay.hide() }, 3000)
+            return
+        }
+
         isRecording = true
 
         val calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Tokyo"))
@@ -193,6 +215,7 @@ class IMUService : Service(), SensorEventListener {
             timeZone = TimeZone.getTimeZone("Asia/Tokyo")
         }.format(calendar.time)
 
+        fileIndex = 0
         initializeStorageFile()
         startForeground(NOTIFICATION_ID, createNotification())
         wakeLock?.acquire()
@@ -209,7 +232,14 @@ class IMUService : Service(), SensorEventListener {
         saveBufferToFirebase()
         sensorManager.unregisterListener(this)
         locationManager.removeUpdates(locationListener)
-        wakeLock?.release()
+
+        // WakeLock安全解放
+        wakeLock?.apply {
+            if (isHeld) {
+                release()
+            }
+        }
+
         statusOverlay.updateMessage("📊 IMU+GPS計測停止")
         mainHandler.postDelayed({ statusOverlay.hide() }, 2000)
 
@@ -267,40 +297,85 @@ class IMUService : Service(), SensorEventListener {
 
     @SuppressLint("SimpleDateFormat")
     private fun initializeStorageFile() {
-        val baseDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-        val folder = File(baseDir, "STS計測データ")
+        try {
+            val baseDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+            val folder = File(baseDir, "STS計測データ")
 
-        if (!folder.exists()) {
-            folder.mkdirs()
-        }
+            if (!folder.exists()) {
+                folder.mkdirs()
+            }
 
-        val fileName = "${sessionStartTime}_imu.csv"
-        storageFile = File(folder, fileName)
-        if (!storageFile.exists()) {
-            storageFile.createNewFile()
-            storageFile.writeText("Timestamp(ms),ax,ay,az,gx,gy,gz,qw,qx,qy,qz,lat,lon,alt,acc\n")
+            val fileName = "${sessionStartTime}_imu_part${fileIndex}.csv"
+            storageFile = File(folder, fileName)
+            currentFileSize = 0L
+
+            if (!storageFile.exists()) {
+                storageFile.createNewFile()
+                val header = "Timestamp(ms),ax,ay,az,gx,gy,gz,qw,qx,qy,qz,lat,lon,alt,acc\n"
+                storageFile.writeText(header)
+                currentFileSize = header.length.toLong()
+            }
+
+            Log.d(TAG, "Initialized storage file: ${storageFile.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing storage file", e)
+            statusOverlay.updateMessage("❌ ファイル初期化エラー")
         }
     }
 
     private fun saveBufferToStorage() {
         if (!::storageFile.isInitialized) return
 
-        val builder = StringBuilder()
-        while (dataBuffer.isNotEmpty()) {
-            val data = dataBuffer.poll()
-            builder.append("${data.timestamp},${data.ax},${data.ay},${data.az},")
-            builder.append("${data.gx},${data.gy},${data.gz},${data.qw},${data.qx},${data.qy},${data.qz},")
-            builder.append("${currentLat},${currentLon},${currentAlt},${currentAcc}\n")
+        var dataToWrite: List<IMUDataPoint>
+        bufferLock.withLock {
+            if (dataBuffer.isEmpty()) return
+            dataToWrite = dataBuffer.toList()
+            dataBuffer.clear()
         }
-        storageFile.appendText(builder.toString())
+
+        try {
+            // ストレージ容量チェック
+            if (getFreeStorageSpace() < MIN_FREE_SPACE) {
+                Log.e(TAG, "Low storage space, stopping recording")
+                statusOverlay.updateMessage("❌ ストレージ容量不足")
+                stopRecording()
+                return
+            }
+
+            val builder = StringBuilder()
+            for (data in dataToWrite) {
+                builder.append("${data.timestamp},${data.ax},${data.ay},${data.az},")
+                builder.append("${data.gx},${data.gy},${data.gz},${data.qw},${data.qx},${data.qy},${data.qz},")
+                builder.append("${currentLat},${currentLon},${currentAlt},${currentAcc}\n")
+            }
+
+            val csvData = builder.toString()
+            val dataSize = csvData.length.toLong()
+
+            // ファイルサイズチェック（100MBでローテーション）
+            if (currentFileSize + dataSize > MAX_FILE_SIZE) {
+                Log.d(TAG, "File size limit reached, rotating to new file")
+                fileIndex++
+                initializeStorageFile()
+            }
+
+            // 効率的な書き込み（FileOutputStreamを使用）
+            FileOutputStream(storageFile, true).use { fos ->
+                fos.write(csvData.toByteArray())
+            }
+
+            currentFileSize += dataSize
+
+            Log.d(TAG, "Wrote ${dataToWrite.size} samples, file size: ${currentFileSize / 1024}KB")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing to storage", e)
+            statusOverlay.updateMessage("❌ ファイル書き込みエラー")
+        }
     }
 
-    // =======================================================
-    // Firebase逐次送信（OOM防止・最大バッファサイズ制限版）
-    // =======================================================
     private fun saveBufferToFirebase() {
-        val chunkSize = 400
-        val maxBufferSize = 2000  // 最大バッファサイズ（約16秒分）
+        // 40kbps環境用: バッファ全送信方式（AccelerometerServiceと同じ）
         var list: List<IMUDataPoint>
         var beforeSize = 0
 
@@ -308,43 +383,36 @@ class IMUService : Service(), SensorEventListener {
             beforeSize = storageBuffer.size
 
             if (storageBuffer.isEmpty()) {
-                Log.w("IMUService", "storageBuffer empty -> skip")
+                Log.w(TAG, "storageBuffer empty -> skip")
                 return
             }
 
-            // バッファが溜まりすぎたら古いデータを削除
+            // バッファオーバーフロー対策（最大3000サンプルまで保持）
             var deletedCount = 0
-            while (storageBuffer.size > maxBufferSize) {
+            while (storageBuffer.size > 3000) {
                 storageBuffer.removeFirst()
                 deletedCount++
             }
             if (deletedCount > 0) {
-                Log.w("IMUService", "Buffer overflow: deleted $deletedCount old samples")
+                Log.w(TAG, "Buffer overflow: deleted $deletedCount old samples")
             }
 
-            // 先頭から最大400個取得して削除
-            val actualChunkSize = minOf(chunkSize, storageBuffer.size)
-            list = mutableListOf<IMUDataPoint>().apply {
-                repeat(actualChunkSize) {
-                    if (storageBuffer.isNotEmpty()) {
-                        add(storageBuffer.removeFirst())
-                    }
-                }
-            }
+            // バッファの全データを送信（AccelerometerServiceと同じ）
+            list = storageBuffer.toList()
+            storageBuffer.clear()
         }
 
         if (list.isEmpty()) {
-            Log.w("IMUService", "No data to send")
+            Log.w(TAG, "No data to send")
             return
         }
 
-        val afterSize = beforeSize - list.size
-        Log.d("IMUService", "Sending ${list.size} pts (buffer: $beforeSize -> $afterSize)")
+        Log.d(TAG, "Sending ${list.size} pts (buffer: $beforeSize -> 0)")
 
         val timeKey = System.currentTimeMillis().toString()
+        // timestamp, 加速度3軸, GPS4項目のみ送信
         val csvChunk = list.joinToString("\n") {
             "${it.timestamp},${it.ax},${it.ay},${it.az}," +
-                    "${it.gx},${it.gy},${it.gz},${it.qw},${it.qx},${it.qy},${it.qz}," +
                     "$currentLat,$currentLon,$currentAlt,$currentAcc"
         }
 
@@ -354,12 +422,22 @@ class IMUService : Service(), SensorEventListener {
 
         ref.setValue(csvChunk)
             .addOnSuccessListener {
-                Log.d("IMUService", "Firebase send OK: ${list.size} pts")
+                Log.d(TAG, "Firebase send OK: ${list.size} pts (accel+GPS, 40kbps)")
             }
             .addOnFailureListener {
-                Log.e("IMUService", "Firebase send failed: ${it.message}")
-                // 失敗してもデータは既に削除済み（次回は新しいデータを送信）
+                Log.e(TAG, "Firebase send failed: ${it.message}")
             }
+    }
+
+    private fun getFreeStorageSpace(): Long {
+        return try {
+            val path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+            val stat = StatFs(path.path)
+            stat.availableBlocksLong * stat.blockSizeLong
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting storage space", e)
+            0L
+        }
     }
 
     private fun createNotification(): Notification {
@@ -394,7 +472,14 @@ class IMUService : Service(), SensorEventListener {
         }
         sensorManager.unregisterListener(this)
         locationManager.removeUpdates(locationListener)
-        wakeLock?.release()
+
+        // WakeLock安全解放
+        wakeLock?.apply {
+            if (isHeld) {
+                release()
+            }
+        }
+
         statusOverlay.hide()
 
         analysisHandler.removeCallbacksAndMessages(null)
