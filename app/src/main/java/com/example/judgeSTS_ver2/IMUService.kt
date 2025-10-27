@@ -296,24 +296,50 @@ class IMUService : Service(), SensorEventListener {
     }
 
     // =======================================================
-    // Firebase逐次送信（OOM防止・送信済みデータ削除版）
+    // Firebase逐次送信（OOM防止・最大バッファサイズ制限版）
     // =======================================================
     private fun saveBufferToFirebase() {
-        Log.d("IMUService", "saveBufferToFirebase() called")
-
         val chunkSize = 400
+        val maxBufferSize = 2000  // 最大バッファサイズ（約16秒分）
         var list: List<IMUDataPoint>
+        var beforeSize = 0
 
         bufferLock.withLock {
+            beforeSize = storageBuffer.size
+
             if (storageBuffer.isEmpty()) {
                 Log.w("IMUService", "storageBuffer empty -> skip")
                 return
             }
 
-            // 先頭から最大400個取得
+            // バッファが溜まりすぎたら古いデータを削除
+            var deletedCount = 0
+            while (storageBuffer.size > maxBufferSize) {
+                storageBuffer.removeFirst()
+                deletedCount++
+            }
+            if (deletedCount > 0) {
+                Log.w("IMUService", "Buffer overflow: deleted $deletedCount old samples")
+            }
+
+            // 先頭から最大400個取得して削除
             val actualChunkSize = minOf(chunkSize, storageBuffer.size)
-            list = storageBuffer.take(actualChunkSize)
+            list = mutableListOf<IMUDataPoint>().apply {
+                repeat(actualChunkSize) {
+                    if (storageBuffer.isNotEmpty()) {
+                        add(storageBuffer.removeFirst())
+                    }
+                }
+            }
         }
+
+        if (list.isEmpty()) {
+            Log.w("IMUService", "No data to send")
+            return
+        }
+
+        val afterSize = beforeSize - list.size
+        Log.d("IMUService", "Sending ${list.size} pts (buffer: $beforeSize -> $afterSize)")
 
         val timeKey = System.currentTimeMillis().toString()
         val csvChunk = list.joinToString("\n") {
@@ -328,19 +354,11 @@ class IMUService : Service(), SensorEventListener {
 
         ref.setValue(csvChunk)
             .addOnSuccessListener {
-                // 送信成功したら先頭から削除してメモリ解放
-                bufferLock.withLock {
-                    repeat(list.size) {
-                        if (storageBuffer.isNotEmpty()) {
-                            storageBuffer.removeFirst()
-                        }
-                    }
-                }
-                Log.d("IMUService", "Firebase send OK: ${list.size} pts (buffer size: ${storageBuffer.size})")
+                Log.d("IMUService", "Firebase send OK: ${list.size} pts")
             }
             .addOnFailureListener {
                 Log.e("IMUService", "Firebase send failed: ${it.message}")
-                // 失敗時は削除しないので次回リトライされる
+                // 失敗してもデータは既に削除済み（次回は新しいデータを送信）
             }
     }
 
