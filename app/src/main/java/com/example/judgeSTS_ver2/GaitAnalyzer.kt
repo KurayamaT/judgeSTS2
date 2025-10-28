@@ -1,9 +1,9 @@
-// GaitAnalyzer.kt（MATLAB準拠版：Fs=121Hz, GPS不使用, ペダリング除外無効）
+// GaitAnalyzer.kt（MATLAB準拠版：Fs=120Hz, GPS不使用, ペダリング除外無効）
 // ・detectSitStandPositions: 角度スキャン（0.5秒平均）＋2秒以内イベント統合（merge）
 // ・detectPeriodicSteps: BPF(0.5–6Hz, 4次) → abs → findPeaks(≥1.2G, MinDistance=fs/2.5)
 // ・立位(state=="standing")区間のみ歩行検出
 // ・ステップ除外: 起立/着座±2秒, ステップ±0.1秒で角度が全て40°未満
-// ・butter(4, 2/(Fs/2), 'low'), butter(4, [0.5,6]/(Fs/2), 'bandpass') を Fs=121 で算出した係数を使用
+// ・butter(4, 2/(Fs/2), 'low'), butter(4, [0.5,6]/(Fs/2), 'bandpass') を Fs=120 で算出した係数を使用
 // ・累積カウンタ（表示用）は現行仕様に合わせて維持（compute()毎に加算）※MATLABの逐次処理化のため
 
 package com.example.judgeSTS_ver2
@@ -12,7 +12,7 @@ import kotlin.math.*
 import java.util.ArrayDeque
 
 class GaitAnalyzer(
-    private val fs: Int = 121,                     // ★ MATLABと同じ121 Hz
+    private val fs: Int = 120,                     // ★ 実際のセンサーサンプリング周波数 120 Hz
     private val standThresholdDeg: Double = 65.0,  // 起立閾値（通過点＋0.5s平均）
     private val sitThresholdDeg: Double = 30.0     // 着座閾値（通過点＋0.5s平均）
 ) {
@@ -35,21 +35,21 @@ class GaitAnalyzer(
         val stepCount: Int         // 今回compute窓で新たに検出した歩数
     )
 
-    // ====== MATLAB butter() と同じ係数（Fs=121Hz）======
+    // ====== MATLAB butter() と同じ係数（Fs=120Hz）======
     // Low-pass 2 Hz, order 4
     private val bLP = doubleArrayOf(
-        6.37057949e-06, 2.54823180e-05, 3.82234770e-05, 2.54823180e-05, 6.37057949e-06
+        6.57854320e-06, 2.63141728e-05, 3.94712592e-05, 2.63141728e-05, 6.57854320e-06
     )
     private val aLP = doubleArrayOf(
-        1.0, -3.72867455, 5.22222781, -3.25566572, 0.76221439
+        1.0, -3.72641450, 5.21604820, -3.25001826, 0.76048982
     )
     // Band-pass 0.5–6 Hz, order 4
     private val bBP = doubleArrayOf(
-        2.9381e-04, 0.0, -1.17523e-03, 0.0, 1.76285e-03, 0.0, -1.17523e-03, 0.0, 2.9381e-04
+        3.02909821e-04, 0.0, -1.21163928e-03, 0.0, 1.81745893e-03, 0.0, -1.21163928e-03, 0.0, 3.02909821e-04
     )
     private val aBP = doubleArrayOf(
-        1.0, -7.22536035, 22.88864124, -41.52666998, 47.20065027,
-        -34.42061919, 15.72761984, -4.11695797, 0.47269615
+        1.0, -7.21869892, 22.84720478, -41.41616376, 47.03681425,
+        -34.27473824, 15.64958851, -4.09373642, 0.46972981
     )
 
     // ---- 解析バッファ上限（30秒分）----
@@ -194,12 +194,13 @@ class GaitAnalyzer(
         // 着座→起立区間の整合（any(thigh_angle < sit_threshold) を満たすペアのみ）
         val validSit = ArrayList<Int>()
         val validStd = ArrayList<Int>()
-        val m = min(sitM.size - 1, stdM.size - 1)
-        for (i in 0..m) {
+        // sitM[i] と stdM[i+1] をペアにする（着座→次の起立）
+        for (i in 0 until min(sitM.size, stdM.size - 1)) {
             val s = sitM[i]
-            val e = stdM[min(i + 1, stdM.size - 1)]
+            val e = stdM[i + 1]
             if (e > s && anyBelow(thighAngle, s, e, sitThresholdDeg)) {
-                validSit.add(s); validStd.add(e)
+                validSit.add(s)
+                validStd.add(e)
             }
         }
         val sitToStandCount = validStd.size
@@ -215,13 +216,13 @@ class GaitAnalyzer(
         // 欠損補間
         val yInterp = interpolateLinearNaN(y_raw)
 
-        // --- MATLAB butter(4,[0.5,6]/(121/2),'bandpass') と同一係数 ---
+        // --- MATLAB butter(4,[0.5,6]/(120/2),'bandpass') と同一係数 ---
         val b = doubleArrayOf(
-            0.00029381, 0.0, -0.00117523, 0.0, 0.00176285, 0.0, -0.00117523, 0.0, 0.00029381
+            3.02909821e-04, 0.0, -1.21163928e-03, 0.0, 1.81745893e-03, 0.0, -1.21163928e-03, 0.0, 3.02909821e-04
         )
         val a = doubleArrayOf(
-            1.0, -7.22536035, 22.88864124, -41.52666998, 47.20065027,
-            -34.42061919, 15.72761984, -4.11695797, 0.47269615
+            1.0, -7.21869892, 22.84720478, -41.41616376, 47.03681425,
+            -34.27473824, 15.64958851, -4.09373642, 0.46972981
         )
 
         // --- ゼロ位相フィルタ ---
@@ -296,4 +297,3 @@ private fun List<Double>.standardDeviation(): Double {
     val sumSq = this.fold(0.0) { acc, v -> acc + (v - mean).pow(2.0) }
     return sqrt(sumSq / this.size)
 }
-
