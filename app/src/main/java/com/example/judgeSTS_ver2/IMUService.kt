@@ -290,7 +290,7 @@ class IMUService : Service(), SensorEventListener {
             lastStorageWriteTime = now
         }
 
-        if (shouldSendFirebase && !shouldSaveStorage) {
+        if (shouldSendFirebase) {
             saveBufferToFirebase()
             lastFirebaseWriteTime = now
         }
@@ -333,13 +333,10 @@ class IMUService : Service(), SensorEventListener {
         bufferLock.withLock {
             if (dataBuffer.isEmpty()) return
 
-            val maxBatchSize = 1000  // ★ 拡大: 500→1000
-            val batchSize = min(dataBuffer.size, maxBatchSize)
+            // ★ コピーのみ、削除しない（Firebase送信後にクリアされる）
+            dataToWrite = dataBuffer.toList()
 
-            dataToWrite = dataBuffer.take(batchSize)
-            repeat(batchSize) { dataBuffer.removeFirst() }
-
-            Log.d(TAG, "Processing ${dataToWrite.size} samples (${dataBuffer.size} remaining in buffer)")
+            Log.d(TAG, "Processing ${dataToWrite.size} samples (${dataBuffer.size} copied for storage)")
         }
 
         try {
