@@ -55,6 +55,7 @@ class GaitAnalyzer(
     // ---- 解析バッファ上限（30秒分）----
     private val maxSamples = fs * 30
 
+    @Synchronized
     fun append(tMillis: Long, ax_: Float, ay_: Float, az_: Float) {
         if (ts.size >= maxSamples) {
             ts.removeAt(0); ax.removeAt(0); ay.removeAt(0); az.removeAt(0)
@@ -142,7 +143,7 @@ class GaitAnalyzer(
     }
 
     fun compute(): Result {
-        val n = ts.size
+        val n = minOf(ts.size, ax.size, ay.size, az.size)  // ★ 安全策: 最小サイズを使用
         if (n < fs * 3) return Result(0, 0) // 最低限のデータ長
 
         // ===== 角度計算（LPF 2 Hz → 大腿角度）=====
