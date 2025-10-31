@@ -34,6 +34,7 @@ import java.util.*
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import android.os.HandlerThread
+import kotlin.math.abs
 import kotlin.math.min
 
 class IMUService : Service(), SensorEventListener {
@@ -70,6 +71,8 @@ class IMUService : Service(), SensorEventListener {
     private var currentAz = 0f
 
     private var isFirebaseSending = false
+    private var timeoutRunnable: Runnable? = null
+
     private val STORAGE_WRITE_INTERVAL = 5000L
     private val FIREBASE_WRITE_INTERVAL = 5000L  // ★ 5秒（元に戻す）
     private var lastStorageWriteTime = 0L
@@ -257,6 +260,12 @@ class IMUService : Service(), SensorEventListener {
             Sensor.TYPE_ACCELEROMETER -> {
                 currentAx = event.values[0]
                 currentAy = event.values[1]
+
+                // デバッグ: 最大値を確認
+                if (abs(currentAy) > 15.0) {
+                    Log.d(TAG, "Large Ay detected: $currentAy")
+                }
+
                 currentAz = event.values[2]
                 gaitAnalyzer.append(now, currentAx, currentAy, currentAz)
             }
@@ -377,7 +386,10 @@ class IMUService : Service(), SensorEventListener {
     }
 
     private fun saveBufferToFirebase() {
-        if (isFirebaseSending) return
+        if (isFirebaseSending) {
+            Log.d(TAG, "Firebase still sending, skip this cycle")
+            return
+        }
         isFirebaseSending = true
 
         var dataToSend: List<IMUDataPoint>
@@ -390,15 +402,27 @@ class IMUService : Service(), SensorEventListener {
             dataBuffer.clear()
         }
 
+        // 前回のタイムアウトハンドラーを確実にキャンセル
+        timeoutRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            Log.d(TAG, "Cancelled previous timeout handler")
+        }
+
+        // 新しいタイムアウトハンドラーを作成
+        val newTimeoutRunnable = Runnable {
+            if (isFirebaseSending) {
+                Log.e(TAG, "Firebase send timeout, force reset flag")
+                isFirebaseSending = false
+                timeoutRunnable = null
+            }
+        }
+        timeoutRunnable = newTimeoutRunnable
+        mainHandler.postDelayed(newTimeoutRunnable, 10000)
+
         try {
             val timeKey = System.currentTimeMillis().toString()
-            // timestamp, ax, ay, az, speed (GPS更新時のみ値あり)
             val csvChunk = dataToSend.joinToString("\n") {
-                val speedStr = if (it.speed != 0.0f) {
-                    "%.2f".format(it.speed)
-                } else {
-                    ""
-                }
+                val speedStr = if (it.speed != 0.0f) "%.2f".format(it.speed) else ""
                 "${it.timestamp},${"%.3f".format(it.ax)},${"%.3f".format(it.ay)},${"%.3f".format(it.az)},$speedStr"
             }
 
@@ -408,6 +432,10 @@ class IMUService : Service(), SensorEventListener {
 
             ref.setValue(csvChunk)
                 .addOnSuccessListener {
+                    timeoutRunnable?.let {
+                        mainHandler.removeCallbacks(it)
+                        timeoutRunnable = null
+                    }
                     Log.d(TAG, "Firebase send OK: ${dataToSend.size} pts (with GPS speed)")
                 }
                 .addOnFailureListener { e ->

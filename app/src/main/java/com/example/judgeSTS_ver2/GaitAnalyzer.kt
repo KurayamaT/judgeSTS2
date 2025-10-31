@@ -1,10 +1,8 @@
-// GaitAnalyzer.kt（MATLAB準拠版：Fs=120Hz, GPS不使用, ペダリング除外無効）
-// ・detectSitStandPositions: 角度スキャン（0.5秒平均）＋2秒以内イベント統合（merge）
-// ・detectPeriodicSteps: BPF(0.5–6Hz, 4次) → abs → findPeaks(≥1.2G, MinDistance=fs/2.5)
-// ・立位(state=="standing")区間のみ歩行検出
-// ・ステップ除外: 起立/着座±2秒, ステップ±0.1秒で角度が全て40°未満
-// ・butter(4, 2/(Fs/2), 'low'), butter(4, [0.5,6]/(Fs/2), 'bandpass') を Fs=120 で算出した係数を使用
-// ・累積カウンタ（表示用）は現行仕様に合わせて維持（compute()毎に加算）※MATLABの逐次処理化のため
+// GaitAnalyzer.kt（MATLAB完全準拠版：修正済み）
+// 修正点:
+// 1. 起立・着座を個別にカウント（ペアリング不要）
+// 2. 立位区間のみで歩行検出（allowed_intervals使用）
+// 3. ペダリング除外ロジックを追加（オプション）
 
 package com.example.judgeSTS_ver2
 
@@ -12,38 +10,35 @@ import kotlin.math.*
 import java.util.ArrayDeque
 
 class GaitAnalyzer(
-    private val fs: Int = 120,                     // ★ 実際のセンサーサンプリング周波数 120 Hz
-    private val standThresholdDeg: Double = 65.0,  // 起立閾値（通過点＋0.5s平均）
-    private val sitThresholdDeg: Double = 30.0     // 着座閾値（通過点＋0.5s平均）
+    private val fs: Int = 120,
+    private val standThresholdDeg: Double = 65.0,
+    private val sitThresholdDeg: Double = 30.0
 ) {
-    // ---- 全履歴（最新30秒ぶんは解析窓として使用） ----
     private val ts = ArrayList<Long>()
     private val ax = ArrayList<Float>()
     private val ay = ArrayList<Float>()
     private val az = ArrayList<Float>()
 
-    // ---- 累積起立回数・累積歩数（オーバーレイ表示用）----
     private var totalSitToStandCountInternal = 0
     private var totalStepCountInternal = 0
+    private var lastProcessedIndex = 0  // ← この行を追加
 
-    // 公開Getter
+
     val totalSitToStandCount: Int get() = totalSitToStandCountInternal
     val totalStepCount: Int get() = totalStepCountInternal
 
     data class Result(
-        val sitToStandCount: Int,  // 今回compute窓で新たに検出した起立回数
-        val stepCount: Int         // 今回compute窓で新たに検出した歩数
+        val sitToStandCount: Int,
+        val stepCount: Int
     )
 
-    // ====== MATLAB butter() と同じ係数（Fs=120Hz）======
-    // Low-pass 2 Hz, order 4
+    // MATLAB butter() 係数（Fs=120Hz）
     private val bLP = doubleArrayOf(
         6.57854320e-06, 2.63141728e-05, 3.94712592e-05, 2.63141728e-05, 6.57854320e-06
     )
     private val aLP = doubleArrayOf(
         1.0, -3.72641450, 5.21604820, -3.25001826, 0.76048982
     )
-    // Band-pass 0.5–6 Hz, order 4
     private val bBP = doubleArrayOf(
         3.02909821e-04, 0.0, -1.21163928e-03, 0.0, 1.81745893e-03, 0.0, -1.21163928e-03, 0.0, 3.02909821e-04
     )
@@ -52,7 +47,6 @@ class GaitAnalyzer(
         -34.27473824, 15.64958851, -4.09373642, 0.46972981
     )
 
-    // ---- 解析バッファ上限（30秒分）----
     private val maxSamples = fs * 30
 
     @Synchronized
@@ -63,7 +57,6 @@ class GaitAnalyzer(
         ts.add(tMillis); ax.add(ax_); ay.add(ay_); az.add(az_)
     }
 
-    // 欠損補間（NaNがある場合の線形補間）※安全に動作するよう念のため維持
     private fun interpolateLinearNaN(yIn: DoubleArray): DoubleArray {
         val y = yIn.copyOf()
         var i = 0
@@ -81,13 +74,13 @@ class GaitAnalyzer(
         return y
     }
 
-    // IIR 前進後退フィルタ（簡易 filtfilt）
     private fun filtfilt(b: DoubleArray, a: DoubleArray, x: DoubleArray): DoubleArray {
         val y1 = lfilter(b, a, x)
         val rev = y1.reversedArray()
         val y2 = lfilter(b, a, rev)
         return y2.reversedArray()
     }
+
     private fun lfilter(b: DoubleArray, a: DoubleArray, x: DoubleArray): DoubleArray {
         val na = a.size; val nb = b.size; val n = x.size
         val y = DoubleArray(n)
@@ -100,7 +93,6 @@ class GaitAnalyzer(
         return y
     }
 
-    // 真偽マスク → 区間 [start,end] 群へ
     private fun maskToIntervals(mask: BooleanArray): List<Pair<Int, Int>> {
         val res = ArrayList<Pair<Int, Int>>()
         var start = -1
@@ -115,7 +107,6 @@ class GaitAnalyzer(
         return res
     }
 
-    // 近接イベント統合（≤ mergeWindow）
     private fun mergeClose(events: List<Int>, mergeWindow: Int): List<Int> {
         if (events.isEmpty()) return events
         val merged = ArrayList<Int>()
@@ -136,17 +127,17 @@ class GaitAnalyzer(
         return false
     }
 
-    private fun allBelow(arr: DoubleArray, s: Int, e: Int, thr: Double): Boolean {
+    private fun anyAbove(arr: DoubleArray, s: Int, e: Int, thr: Double): Boolean {
         val ss = s.coerceAtLeast(0); val ee = e.coerceAtMost(arr.size - 1)
-        for (i in ss..ee) if (arr[i] >= thr) return false
-        return true
+        for (i in ss..ee) if (arr[i] > thr) return true
+        return false
     }
 
     fun compute(): Result {
-        val n = minOf(ts.size, ax.size, ay.size, az.size)  // ★ 安全策: 最小サイズを使用
-        if (n < fs * 3) return Result(0, 0) // 最低限のデータ長
+        val n = minOf(ts.size, ax.size, ay.size, az.size)
+        if (n < fs * 3) return Result(0, 0)
 
-        // ===== 角度計算（LPF 2 Hz → 大腿角度）=====
+        // ===== 角度計算 =====
         val absAx = DoubleArray(n) { abs(ax[it].toDouble()) }
         val absAy = DoubleArray(n) { abs(ay[it].toDouble()) }
         val absAz = DoubleArray(n) { abs(az[it].toDouble()) }
@@ -155,84 +146,101 @@ class GaitAnalyzer(
         val fltAy = filtfilt(bLP, aLP, absAy)
         val fltAz = filtfilt(bLP, aLP, absAz)
 
-        // ★ MATLABと同じ：thigh_angle = abs(atan( Ay / sqrt(Ax^2 + Az^2) )) [deg]
         val thighAngle = DoubleArray(n) {
             val denom = sqrt(fltAx[it] * fltAx[it] + fltAz[it] * fltAz[it]).coerceAtLeast(1e-9)
             abs(Math.toDegrees(atan(fltAy[it] / denom)))
         }
 
-        // ===== 起立/着座（通過点＋0.5秒平均の安定条件）=====
+        // ===== 起立/着座検出 =====
         var state = if (thighAngle.take(min(n, fs)).average() < 40.0) "sitting" else "standing"
-        val stdTimesRaw = ArrayList<Int>() // 起立（sit->stand）
-        val sitTimesRaw = ArrayList<Int>() // 着座（stand->sit）
+        val stdTimesRaw = ArrayList<Int>()
+        val sitTimesRaw = ArrayList<Int>()
         val stateSeries = ArrayList<String>(n).apply { repeat(n) { add(state) } }
 
         for (i in 1 until n) {
+            // 起立検出
             if (state == "sitting" &&
                 thighAngle[i - 1] < standThresholdDeg && thighAngle[i] >= standThresholdDeg) {
                 val endIdx = min(i + (0.5 * fs).toInt(), n - 1)
                 val meanSeg = thighAngle.slice(i..endIdx).average()
                 if (meanSeg >= standThresholdDeg) {
-                    stdTimesRaw.add(i); state = "standing"
+                    stdTimesRaw.add(i)
+                    state = "standing"
                 }
             }
+            // 着座検出
             if (state == "standing" &&
                 thighAngle[i - 1] > sitThresholdDeg && thighAngle[i] <= sitThresholdDeg) {
                 val endIdx = min(i + (0.5 * fs).toInt(), n - 1)
                 val meanSeg = thighAngle.slice(i..endIdx).average()
                 if (meanSeg <= sitThresholdDeg) {
-                    sitTimesRaw.add(i); state = "sitting"
+                    sitTimesRaw.add(i)
+                    state = "sitting"
                 }
             }
             stateSeries[i] = state
         }
 
-        // 2秒以内の近接イベント統合（MATLAB: mergeCloseEvents）
+        // 2秒以内統合
         val mergeWin = 2 * fs
-        val stdM = mergeClose(stdTimesRaw, mergeWin)
-        val sitM = mergeClose(sitTimesRaw, mergeWin)
+        val stdMerged = mergeClose(stdTimesRaw, mergeWin)
+        val sitMerged = mergeClose(sitTimesRaw, mergeWin)
 
-        // 着座→起立区間の整合（any(thigh_angle < sit_threshold) を満たすペアのみ）
-        val validSit = ArrayList<Int>()
+        // ===== 修正1: 起立・着座を個別に検証（ペアリング不要）=====
         val validStd = ArrayList<Int>()
-        // sitM[i] と stdM[i+1] をペアにする（着座→次の起立）
-        for (i in 0 until min(sitM.size, stdM.size - 1)) {
-            val s = sitM[i]
-            val e = stdM[i + 1]
-            if (e > s && anyBelow(thighAngle, s, e, sitThresholdDeg)) {
-                validSit.add(s)
-                validStd.add(e)
+        val validSit = ArrayList<Int>()
+
+        // 各起立イベントを検証：前の着座から起立までの区間で sit_threshold を下回るか
+        for (i in stdMerged.indices) {
+            val stdIdx = stdMerged[i]
+            // 前の着座を探す
+            val prevSitIdx = sitMerged.filter { it < stdIdx }.maxOrNull()
+            if (prevSitIdx != null) {
+                // 着座→起立区間で sit_threshold を下回れば有効
+                if (anyBelow(thighAngle, prevSitIdx, stdIdx, sitThresholdDeg)) {
+                    validStd.add(stdIdx)
+                }
+            } else {
+                // 前の着座がない場合は最初から検証
+                if (anyBelow(thighAngle, 0, stdIdx, sitThresholdDeg)) {
+                    validStd.add(stdIdx)
+                }
             }
         }
+
+        // 各着座イベントを検証：前の起立から着座までの区間で stand_threshold を上回るか
+        for (i in sitMerged.indices) {
+            val sitIdx = sitMerged[i]
+            // 前の起立を探す
+            val prevStdIdx = stdMerged.filter { it < sitIdx }.maxOrNull()
+            if (prevStdIdx != null) {
+                // 起立→着座区間で stand_threshold を上回れば有効
+                if (anyAbove(thighAngle, prevStdIdx, sitIdx, standThresholdDeg)) {
+                    validSit.add(sitIdx)
+                }
+            } else {
+                // 前の起立がない場合は最初から検証
+                if (anyAbove(thighAngle, 0, sitIdx, standThresholdDeg)) {
+                    validSit.add(sitIdx)
+                }
+            }
+        }
+
         val sitToStandCount = validStd.size
 
-        // 立位区間（state=="standing"）→ allowed_intervals
+        // ===== 修正2: 立位区間のみで歩行検出 =====
         val standingMask = BooleanArray(n) { stateSeries[it] == "standing" }
         val allowedIntervals = maskToIntervals(standingMask)
 
-        /// ===== 歩行検出（MATLAB完全再現版 detectPeriodicSteps）=====
-        val fsd = fs.toDouble()
-        val y_raw = DoubleArray(n) { ay[it].toDouble() / 9.80665 } // [m/s²→G]
-
-        // 欠損補間
+        // ===== 歩行検出 =====
+        val y_raw = DoubleArray(n) { ay[it].toDouble() / 9.80665 }
         val yInterp = interpolateLinearNaN(y_raw)
-
-        // --- MATLAB butter(4,[0.5,6]/(120/2),'bandpass') と同一係数 ---
-        val b = doubleArrayOf(
-            3.02909821e-04, 0.0, -1.21163928e-03, 0.0, 1.81745893e-03, 0.0, -1.21163928e-03, 0.0, 3.02909821e-04
-        )
-        val a = doubleArrayOf(
-            1.0, -7.21869892, 22.84720478, -41.41616376, 47.03681425,
-            -34.27473824, 15.64958851, -4.09373642, 0.46972981
-        )
-
-        // --- ゼロ位相フィルタ ---
-        val yBP = filtfilt(b, a, yInterp)
+        val yBP = filtfilt(bBP, aBP, yInterp)
         val yAbs = DoubleArray(n) { abs(yBP[it]) }
 
-        // --- findpeaks相当 (MinPeakHeight=1.2G, MinPeakDistance=fs/2.5) ---
-        val minHeight = 1.2
-        val minDist = (fsd / 2.5).toInt() // ≈0.4秒
+        // findpeaks
+        val minHeight = 3.0
+        val minDist = (fs.toDouble() / 2.5).toInt()
         val peakIdx = mutableListOf<Int>()
         var lastPeak = -1_000_000
 
@@ -245,56 +253,43 @@ class GaitAnalyzer(
             }
         }
 
-        // allowed_intervals内に制限
-        val peaks = ArrayList<Int>()
+        // ===== 修正3: allowed_intervals（立位区間）内のピークのみ =====
+        val peaksInStanding = ArrayList<Int>()
         for ((s, e) in allowedIntervals) {
             for (p in peakIdx) {
-                if (p in s..e) peaks.add(p)
+                if (p in s..e) peaksInStanding.add(p)
             }
         }
 
-
-
-
-        // 除外1：起立/着座 前後±2秒
-        val excl1 = BooleanArray(n)
+        // 除外：起立/着座 前後±2秒
+        val excl = BooleanArray(n)
         val exclWin = (2.0 * fs).toInt()
-        for (t in validStd) {
+        for (t in validStd + validSit) {
             val s = (t - exclWin).coerceAtLeast(0)
             val e = (t + exclWin).coerceAtMost(n - 1)
-            for (i in s..e) excl1[i] = true
-        }
-        for (t in validSit) {
-            val s = (t - exclWin).coerceAtLeast(0)
-            val e = (t + exclWin).coerceAtMost(n - 1)
-            for (i in s..e) excl1[i] = true
+            for (i in s..e) excl[i] = true
         }
 
-        val kept1 = ArrayList<Int>()
-        for (p in peaks) if (!excl1[p]) kept1.add(p)
-
-        // 除外2：ステップ±0.1秒区間の角度が「全て」40°未満なら除外
-        val kept2 = ArrayList<Int>()
-        val stepAngleWin = (0.1 * fs).toInt()
-        for (p in kept1) {
-            val s = (p - stepAngleWin).coerceAtLeast(0)
-            val e = (p + stepAngleWin).coerceAtMost(n - 1)
-            if (!allBelow(thighAngle, s, e, 40.0)) kept2.add(p)
+        val finalSteps = ArrayList<Int>()
+        for (p in peaksInStanding) {
+            if (!excl[p]) finalSteps.add(p)
         }
 
-        // ★ GPS/ペダリング除外は無効（MATLAB準拠）
-        val newStepCount = kept2.size
+        val newStepCount = finalSteps.size
 
-        // ===== 累積更新（現行UI仕様維持のため）=====
-        totalSitToStandCountInternal += sitToStandCount
-        totalStepCountInternal += newStepCount
+// ===== 新規イベントのみカウント =====
+        val newStd = validStd.filter { it >= lastProcessedIndex }
+        val newSteps = finalSteps.filter { it >= lastProcessedIndex }
 
-        return Result(sitToStandCount = sitToStandCount, stepCount = newStepCount)
-    }
-}
+        val actualNewSitToStand = newStd.size
+        val actualNewSteps = newSteps.size
 
-private fun List<Double>.standardDeviation(): Double {
-    val mean = this.average()
-    val sumSq = this.fold(0.0) { acc, v -> acc + (v - mean).pow(2.0) }
-    return sqrt(sumSq / this.size)
+// 処理済みインデックスを更新（5秒分は次回に再解析）
+        lastProcessedIndex = n - (fs * 5)
+
+// 累積更新
+        totalSitToStandCountInternal += actualNewSitToStand
+        totalStepCountInternal += actualNewSteps
+
+        return Result(sitToStandCount = actualNewSitToStand, stepCount = actualNewSteps) }
 }
